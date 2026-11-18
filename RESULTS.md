@@ -1,0 +1,219 @@
+# Results — ADHD EEG classification on the 121-child dataset
+
+All numbers below are our own runs, produced by this repository. The deployed model and every comparison use **subject-wise** validation: a child's epochs never appear in both training and test.
+
+| | |
+|---|---|
+| **Dataset** | [IEEE DataPort 121-child EEG dataset](https://ieee-dataport.org/open-access/eeg-data-adhd-control-children) (DOI [10.21227/rzfh-zn36](https://doi.org/10.21227/rzfh-zn36)) |
+| **Cohort** | 121 children — 61 ADHD / 60 control, ages 7–12, 19 channels, 128 Hz |
+| **Task** | Visual attention task, 5-second epochs |
+| **Epochs kept after z-score rejection** | 2,918 |
+| **Evaluation** | Subject-wise 5-fold CV, 3 repeats; per-fold Youden threshold chosen on validation subjects only |
+| **Reference method** | CTE-Net, Gomez-Rivera et al., *Sensors* 2026 — [10.3390/s26185786](https://doi.org/10.3390/s26185786) |
+| **Run date** | Trained 2026-11-15 |
+
+> Research prototype. Single site, wide confidence intervals, and model selection was done on these same 121 subjects. **Not a diagnostic device.**
+
+---
+
+## 1. Headline results
+
+| Result | Accuracy (95% CI) | AUROC (95% CI) | Sensitivity | Specificity |
+|---|---:|---:|---:|---:|
+| **Deployed SVM, 3-repeat majority vote** | **69.4%** (61.2–77.7) | **0.747** (0.656–0.834) | **0.852** | 0.533 |
+| Conservative single-model estimate | 66.4% ± 1.3 | 0.739 ± 0.016 | 0.765 | 0.561 |
+| CTE-Net reimplementation (deep model) | 62.8% (54.5–71.9) | 0.673 (0.576–0.768) | 0.672 | 0.583 |
+| Published clean SVM (Geethapriya & Pattabiraman) | 65.6% | — | — | — |
+| Published clean CNN (same paper) | 72.7% | 0.72 | — | — |
+| Published leaky segment-wise SVM | 90.0% | — | — | — |
+| Published headline CNN (Hassan & Singhal) | 100% | — | 1.0 | 1.0 |
+
+Our final model sits between the published clean SVM and CNN, and far below the 90–100% headlines that used random epoch splits.
+
+### Deployed model — full metrics (3-repeat vote, n = 121)
+
+| Metric | Value |
+|---|---:|
+| AUROC | 0.747 (0.656–0.834) |
+| AUPRC | 0.725 (0.611–0.842) |
+| Accuracy | 0.694 (0.612–0.777) |
+| Sensitivity / recall | 0.852 |
+| Specificity | 0.533 |
+| PPV / NPV | 0.650 / 0.780 |
+| F1 | 0.738 |
+| Brier score | 0.218 |
+| ECE | 0.136 |
+| Confusion matrix | TP 52 · TN 32 · FP 28 · FN 9 |
+
+### Deployed artifact
+
+`models/adhd_svm_select150.joblib` — RBF-SVM on log band power, relative band power, and VAR-based directed-connectivity edges; 150 of 380 features selected **inside each training fold**; 119 training subjects (demos `v107` and `v10p` held out); 2,874 training epochs. Threshold 0.5. Metadata: `models/model_metadata.json`.
+
+---
+
+## 2. CTE-Net reimplementation (deep model)
+
+Transformer over channel-wise spectral features with a directed-connectivity bias; `configs/eeg_cte_real.yaml`; 5-fold subject-wise CV on 2,918 epochs.
+
+| Split | Accuracy | AUROC | AUPRC | Brier | ECE |
+|---|---:|---:|---:|---:|---:|
+| Subject level (n = 121) | 0.628 | 0.673 | 0.635 | 0.233 | 0.112 |
+| Epoch level (n = 2,918) | 0.606 | 0.636 | 0.659 | 0.266 | 0.176 |
+
+### Per-fold results (subject level)
+
+| Fold | n | Accuracy | AUROC | Sensitivity | Specificity |
+|---|---:|---:|---:|---:|---:|
+| 1 | 25 | 0.640 | 0.628 | 0.846 | 0.417 |
+| 2 | 24 | 0.542 | 0.569 | 0.583 | 0.500 |
+| 3 | 24 | 0.625 | 0.708 | 0.750 | 0.500 |
+| 4 | 24 | 0.583 | 0.701 | 0.333 | 0.833 |
+| 5 | 24 | 0.750 | 0.799 | 0.833 | 0.667 |
+
+Fold AUROCs range from 0.57 to 0.80 — with only 24–25 test subjects per fold, that spread is expected.
+
+**ICA blink removal was tested and rejected:** AUROC dropped from 0.66 to 0.51, likely because it removed frontal theta/alpha signal that carries group information. The pipeline therefore uses z-score epoch rejection only.
+
+---
+
+## 3. Classical baselines (single subject-wise 5-fold run)
+
+Features: `node` = per-channel band power, `adj` = directed-connectivity edges, `rel` = relative band power.
+
+| Features | Model | AUROC | Accuracy | Sensitivity | Specificity |
+|---|---|---:|---:|---:|---:|
+| node+adj | Extra Trees | 0.711 | 0.645 | 0.705 | 0.583 |
+| node+adj | SVM-RBF | 0.697 | 0.661 | 0.656 | 0.667 |
+| node+adj | Random Forest | 0.692 | 0.620 | 0.803 | 0.433 |
+| node | Extra Trees | 0.679 | 0.620 | 0.754 | 0.483 |
+| node | Random Forest | 0.673 | 0.595 | 0.639 | 0.550 |
+| node | SVM-RBF | 0.656 | 0.612 | 0.656 | 0.567 |
+| node+adj | Hist. Gradient Boosting | 0.648 | 0.620 | 0.689 | 0.550 |
+| node | Hist. Gradient Boosting | 0.631 | 0.595 | 0.541 | 0.650 |
+| node+adj | Logistic Regression | 0.622 | 0.636 | 0.689 | 0.583 |
+| node | Logistic Regression | 0.567 | 0.603 | 0.623 | 0.583 |
+
+Adding connectivity (`adj`) and relative power (`rel`) consistently helped the SVM-family models.
+
+---
+
+## 4. Feature-search results (single 5-fold run, top configurations)
+
+| Features | Model | # Features | AUROC | Accuracy | Sensitivity | Specificity |
+|---|---|---:|---:|---:|---:|---:|
+| node+adj+rel | SVM C=1, γ=0.01 | 380 | **0.753** | 0.678 | 0.656 | 0.700 |
+| node+rel | SVM C=1, γ=0.01 | 209 | 0.741 | 0.653 | 0.590 | 0.717 |
+| node+adj | SVM C=1, γ=0.01 | 285 | 0.733 | 0.653 | 0.754 | 0.550 |
+| node+adj+rel | SVM C=3 | 380 | 0.731 | 0.636 | 0.590 | 0.683 |
+| node+adj+rel | SVM C=1 | 380 | 0.724 | 0.636 | 0.607 | 0.667 |
+| node+adj+rel | SVM C=0.3 | 380 | 0.719 | 0.694 | 0.836 | 0.550 |
+| node+adj+rel | Extra Trees (leaf 3) | 380 | 0.718 | 0.645 | 0.689 | 0.600 |
+| node+adj | SVM C=0.3 | 285 | 0.716 | 0.645 | 0.738 | 0.550 |
+
+21 configurations were compared (full table in `results/feature_search/summary.csv`). Because the winner was chosen on these same subjects, its score is optimistic.
+
+---
+
+## 5. Repeated subject-wise CV of the finalists (3 repeats × 5 folds)
+
+| Configuration | AUROC | Accuracy | Sensitivity | Specificity |
+|---|---:|---:|---:|---:|
+| **epoch_select150_svm** | **0.739 ± 0.016** | **0.664 ± 0.013** | 0.765 | 0.561 |
+| epoch_svm_c1_g0.01 | 0.753 ± 0.009 | 0.639 ± 0.027 | 0.639 | 0.639 |
+| epoch_ensemble_svm | 0.743 ± 0.015 | 0.625 ± 0.033 | 0.612 | 0.639 |
+| epoch_ensemble_svm_et | 0.739 ± 0.014 | 0.634 ± 0.024 | 0.661 | 0.606 |
+| subject_mean_ensemble_svm | 0.726 ± 0.016 | 0.639 ± 0.019 | 0.634 | 0.644 |
+| epoch_svm_c0.3 | 0.722 ± 0.020 | 0.653 ± 0.000 | 0.760 | 0.544 |
+| subject_mean_svm_c1_g0.01 | 0.720 ± 0.025 | 0.656 ± 0.027 | 0.590 | 0.722 |
+| subject_mean_svm_c0.3 | 0.704 ± 0.012 | 0.647 ± 0.005 | 0.792 | 0.500 |
+| subject_mean+std_svm_c1_g0.01 | 0.302 ± 0.020 | 0.438 ± 0.036 | 0.743 | 0.128 |
+
+`epoch_select150_svm` — RBF-SVM with SelectKBest(150) fit inside each fold — won on accuracy and had the most stable AUROC, so it became the deployed model.
+
+### Repeat-by-repeat (`epoch_select150_svm`)
+
+| Repeat | Seed | AUROC | Accuracy | Sensitivity | Specificity |
+|---|---:|---:|---:|---:|---:|
+| 1 | 42 | 0.739 | 0.678 | 0.787 | 0.567 |
+| 2 | 1042 | 0.723 | 0.661 | 0.885 | 0.433 |
+| 3 | 2042 | 0.756 | 0.653 | 0.623 | 0.683 |
+
+---
+
+## 6. Ensemble and final decision rule
+
+Majority vote across the three repeats; mean probability for AUROC.
+
+| Ensemble | Accuracy (95% CI) | AUROC (95% CI) | AUPRC | Sensitivity | Specificity |
+|---|---:|---:|---:|---:|---:|
+| **select150 only (shipped)** | **0.694 (0.612–0.777)** | **0.747 (0.656–0.834)** | 0.725 | 0.852 | 0.533 |
+| select150 + C0.3 + C1γ0.01 | 0.678 (0.595–0.760) | 0.750 (0.660–0.837) | 0.759 | 0.787 | 0.567 |
+| all epoch SVM | 0.669 (0.587–0.752) | 0.754 (0.666–0.841) | 0.762 | 0.738 | 0.600 |
+| all configs except mean+std | 0.636 (0.545–0.719) | 0.757 (0.669–0.842) | 0.776 | 0.738 | 0.533 |
+
+The larger ensembles gain a little AUROC but lose accuracy at the fixed 0.5 threshold — consistent with a ranking/calibration trade-off rather than a better model. The shipped model keeps the higher accuracy.
+
+---
+
+## 7. Leakage demonstration (synthetic, plumbing check only)
+
+Harder synthetic set (80 subjects, weak class effect, strong subject identity), `scripts/leakage_demo.py`:
+
+| Split | Accuracy | AUROC |
+|---|---:|---:|
+| Epoch-level (leaky) | 92.8% | 0.982 |
+| Subject-level (clean) | 78.8% | 0.842 |
+| **Gap** | **14.1 pts** | **0.140** |
+
+On an easier synthetic set both splits hit 100%, which is exactly why the harder set exists. These numbers say nothing about ADHD; they verify that the split logic changes the answer.
+
+Additional synthetic smoke tests:
+
+| Check | Result |
+|---|---|
+| CTE-Net, 3-fold quick, subject level | AUROC 0.871, accuracy 0.775 |
+| CTE-Net, 5-fold full, subject level | AUROC 0.826, accuracy 0.688 |
+| EEGNet raw-signal baseline | AUROC 0.567 — overfit without augmentation |
+
+---
+
+## 8. Interpretation
+
+1. **The leakage story is real.** The same dataset spans 65.6% to 100% depending on the split; our clean reimplementation reproduces the low end, not the headlines.
+2. **Classical features beat the neural reimplementation here.** With 121 subjects, a well-regularised SVM on spectral + connectivity features outperforms a small graph transformer (0.747 vs 0.673 AUROC). Sample size, not architecture, is the binding constraint.
+3. **Connectivity and relative power carry signal.** Adding `adj` and `rel` improved every SVM family baseline.
+4. **ICA hurt.** Removing ocular components also removed frontal theta/alpha group differences.
+5. **Wide CIs dominate.** ±8 accuracy points on 121 subjects; per-fold AUROC spanned 0.57–0.80. Any single-cohort comparison smaller than that is noise.
+6. **The ADHD group was medicated** (Ritalin up to 6 months), which can suppress group differences and bias toward the null.
+
+## 9. Caveats
+
+- Single site, 121 children; no external cohort.
+- Model and feature selection were done on these same subjects, so the top-line estimate is optimistic.
+- `granger` connectivity is a ridge-regularised VAR proxy, not formal transfer entropy / Granger causality.
+- The CTE-Net implementation is a clean reimplementation, not the authors' code.
+- The 95% CI is roughly ±8 accuracy points; a second cohort could move the result more than any modelling gain here.
+- Research/screening only — at low prevalence, PPV is much lower than accuracy suggests.
+
+## 10. Reproduce
+
+```bash
+python -m pip install -r requirements.txt
+
+# One-time data prep (after extracting the four archives to data/real/raw/)
+python scripts/prepare_ieee_dataset.py
+
+# Deep model
+python scripts/run_cv.py --config configs/eeg_cte_real.yaml
+
+# Classical baselines, feature search, repeated CV, ensembles
+python scripts/classical_baseline.py --config configs/eeg_cte_real.yaml
+python scripts/feature_search.py --config configs/eeg_cte_real.yaml
+python scripts/final_validation.py --config configs/eeg_cte_real.yaml --repeats 3
+python scripts/ensemble_validation.py
+
+# Deployed web-app artifact (holds out demo subjects v107 and v10p)
+python scripts/train_deploy_model.py
+```
+
+Raw outputs — `metrics.json`, out-of-fold predictions, fold metrics, training history, ROC/PR, calibration, confusion matrices — are written to `results/` (git-ignored). The deployable artifact and its metrics live in `models/`.

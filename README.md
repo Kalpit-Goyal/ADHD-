@@ -10,6 +10,8 @@ This folder contains a literature review, a structured paper database, and a wor
 | [`research/adhd_papers.csv`](research/adhd_papers.csv) | Sortable table of papers with modality, dataset, n, method, validation, accuracy/AUC, PMID, DOI |
 | [`research/accuracy_inflation_eeg.png`](research/accuracy_inflation_eeg.png) | Bar chart: same EEG dataset, 65.6%–100% depending on the split |
 | [`research/make_accuracy_chart.py`](research/make_accuracy_chart.py) | Script that regenerates the chart |
+| [`RESULTS.md`](RESULTS.md) | All of our experiment results: headline numbers, per-fold tables, baselines, feature search, ensembles, caveats |
+| [`sensors-26-05786-v2.pdf`](sensors-26-05786-v2.pdf) | The CTE-Net reference paper (Gomez-Rivera et al., *Sensors* 2026) |
 
 ## Web app — NeuroScan AI (ADHD EEG screening)
 
@@ -164,6 +166,8 @@ I tested the improvements that could plausibly raise subject-level accuracy. Eve
 **Best final accuracy: 69.4%** (95% CI 61.2–77.7%), with AUROC **0.747**, sensitivity 0.852, and specificity 0.533. The model is an RBF SVM on log band power, relative band power, and directed-connectivity edges, with 150 features selected inside each training fold. It was evaluated with 3 repeats of subject-wise 5-fold CV; the reported prediction is the majority vote of the three repeats.
 
 The conservative single-model estimate is **66.4% ± 1.3%** across repeats. The 69.4% vote is the same result after variance reduction, not a different model. Both are single-site estimates with a wide CI, and the configuration was chosen after comparing several models on these same subjects, so the top number is optimistic. A clean external cohort would likely land nearer 65–70%. Per-repeat predictions and summaries are in `results/final_validation/`.
+
+Full experiment log — every baseline, feature-search configuration, per-fold table, ensemble, and the synthetic leakage check — is in [`RESULTS.md`](RESULTS.md).
 
 ICA was tested and rejected: it dropped AUROC from 0.66 to 0.51, likely because it removed frontal theta/alpha activity that carries group information. The pipeline therefore uses z-score epoch rejection only. The ADHD group was medicated (Ritalin up to 6 months), which can suppress group differences.
 
@@ -350,3 +354,22 @@ Source: Geethapriya & Pattabiraman (2026), PMID 42903275.
 3. Brown et al. (2012) — ADHD-200 competition results. PMID 23060754.
 4. Gaus et al. (2023) — ABCD structural MRI, 6,916 children. PMID 38054056.
 5. Li et al. (2026) — AE-STEN, 747 subjects, 76.06%. PMID 41740109.
+
+## References and citations
+
+**Method this repo reimplements**
+- Gomez-Rivera A, Pastrana-Cortés JD, Álvarez-Meza AM, Gil-Gonzalez J, Cárdenas-Peña D. Transformer-based modeling of directed transfer entropy connectivity for EEG-based ADHD classification in children. *Sensors.* 2026;26(18):5786.
+  DOI [10.3390/s26185786](https://doi.org/10.3390/s26185786) · PMID [42817338](https://pubmed.ncbi.nlm.nih.gov/42817338/) · PDF: [`sensors-26-05786-v2.pdf`](sensors-26-05786-v2.pdf)
+
+**Dataset**
+- IEEE DataPort. *EEG data of ADHD and control children.* DOI [10.21227/rzfh-zn36](https://doi.org/10.21227/rzfh-zn36) · <https://ieee-dataport.org/open-access/eeg-data-adhd-control-children> (61 ADHD / 60 control, 19 channels, 128 Hz, CC BY 4.0, free IEEE account)
+
+**Leakage benchmark (read first)**
+- Geethapriya M, Pattabiraman K. Subject-independent classification of ADHD from pediatric EEG: a leakage-aware deep learning framework with interpretable neurophysiological mapping. *Front Neurosci.* 2026;20:1925266.
+  DOI [10.3389/fnins.2026.1925266](https://doi.org/10.3389/fnins.2026.1925266) · PMID [42903275](https://pubmed.ncbi.nlm.nih.gov/42903275/)
+
+**Headline 100% baseline**
+- Hassan U, Singhal A. Convolutional neural network framework for EEG-based ADHD diagnosis in children. *Health Inf Sci Syst.* 2024;12:44.
+  DOI [10.1007/s13755-024-00305-7](https://doi.org/10.1007/s13755-024-00305-7) · PMID [39224441](https://pubmed.ncbi.nlm.nih.gov/39224441/)
+
+If you reuse this repository, cite the CTE-Net paper and the dataset above.
