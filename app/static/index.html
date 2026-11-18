@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>NeuroScan AI — ADHD EEG Screening</title>
+<meta name="description" content="A research prototype that screens 19-channel EEG recordings for ADHD-like patterns and points you to real specialists for confirmation."/>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/styles.css"/>
+</head>
+<body>
+
+<!-- ── NAVBAR ── -->
+<nav>
+  <a href="#" class="nav-logo">
+    <div class="nav-logo-mark"></div>
+    <span class="nav-logo-text">Neuro<span>Scan</span> AI</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="#modules">Overview</a></li>
+    <li><a href="#analyze">Analyze</a></li>
+    <li><a href="#specialists">Specialists</a></li>
+    <li><a href="#how">Method</a></li>
+    <li><a href="#tech">Stack</a></li>
+  </ul>
+  <div class="nav-badge">v1.0 · RESEARCH</div>
+</nav>
+
+<!-- ── HERO ── -->
+<div class="hero">
+  <div class="hero-visual" aria-hidden="true">
+    <div class="scan-ring"></div>
+    <div class="scan-ring"></div>
+    <div class="scan-ring"></div>
+    <div class="scan-ring scan-ring-core"></div>
+  </div>
+
+  <svg class="hero-trace" viewBox="0 0 1200 120" preserveAspectRatio="none" aria-hidden="true">
+    <path d="M0 70 L60 70 L78 62 L92 84 L108 28 L124 96 L140 70 L200 70 L220 64 L234 78 L248 44 L262 88 L276 70 L340 70 L358 58 L372 86 L388 36 L404 92 L420 70 L500 70 L520 66 L534 76 L548 50 L562 86 L578 70 L650 70 L670 60 L684 88 L700 32 L716 94 L732 70 L810 70 L828 64 L842 80 L856 48 L870 88 L884 70 L950 70 L968 62 L982 84 L998 40 L1014 90 L1030 70 L1100 70 L1118 66 L1132 76 L1146 54 L1160 84 L1174 70 L1200 70"
+          fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+  </svg>
+
+  <p class="hero-eyebrow">EEG Signal Analysis · Research Prototype</p>
+  <h1 class="hero-title">ADHD<br/><em>Screening</em></h1>
+  <p class="hero-subtitle">An EEG-based screening prototype for attention-related patterns. Upload a 19-channel resting-state recording, get a plain-language screening score, then find a real ADHD specialist to confirm it in person.</p>
+
+  <div class="hero-cta">
+    <a href="#analyze" class="btn-primary">Start Screening</a>
+    <a href="#specialists" class="btn-outline">Find a Specialist</a>
+  </div>
+
+  <div class="hero-stats">
+    <div class="stat-item">
+      <span class="stat-num">121</span>
+      <span class="stat-label">Children in Dataset</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">19</span>
+      <span class="stat-label">EEG Channels</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">0.747</span>
+      <span class="stat-label">Subject-Level AUROC</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-num">8</span>
+      <span class="stat-label">Curated Pune Clinics</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── OVERVIEW / MODULES ── -->
+<section id="modules">
+  <p class="section-label">How the pipeline is built</p>
+  <h2 class="section-title">From raw EEG to <em>next steps</em></h2>
+  <p class="section-lead">Each recording is cleaned, split into 5-second epochs, and summarised with spectral and connectivity features. A subject-level score comes from averaging the model's per-epoch votes. Then the app hands you real-world next steps.</p>
+
+  <div class="modules-grid">
+    <div class="module-card">
+      <div class="module-icon">
+        <svg viewBox="0 0 24 24"><path d="M2 12h3l2-7 4 14 3-11 2 4h6"/></svg>
+      </div>
+      <div class="module-name">EEG Input</div>
+      <div class="module-desc">A 19-channel resting-state recording. Demo subjects are held out of training, so their scores are genuinely out-of-sample.</div>
+      <div class="module-tags">
+        <span class="tag active">19 channels</span>
+        <span class="tag active">128 Hz</span>
+        <span class="tag">.npy · .csv · .mat</span>
+      </div>
+    </div>
+
+    <div class="module-card">
+      <div class="module-icon">
+        <svg viewBox="0 0 24 24"><path d="M4 20V10M9 20V4M14 20v-7M19 20V7"/></svg>
+      </div>
+      <div class="module-name">Spectral Features</div>
+      <div class="module-desc">Log band power in delta, theta, alpha, beta, and gamma, plus the theta/beta ratio and relative band power per channel.</div>
+      <div class="module-tags">
+        <span class="tag active">5 bands</span>
+        <span class="tag active">380 features</span>
+        <span class="tag">θ/β ratio</span>
+      </div>
+    </div>
+
+    <div class="module-card">
+      <div class="module-icon">
+        <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="19" cy="18" r="2.2"/><circle cx="12" cy="12" r="2.2"/><path d="M7 11l3.2-1.2M13.8 10.6L17 7.4M13.8 13.4L17 16.6"/></svg>
+      </div>
+      <div class="module-name">Directed Connectivity</div>
+      <div class="module-desc">Granger-causality estimates across every channel pair capture how activity flows between brain regions during each epoch.</div>
+      <div class="module-tags">
+        <span class="tag active">Granger</span>
+        <span class="tag active">171 pairs</span>
+        <span class="tag">5-second epochs</span>
+      </div>
+    </div>
+
+    <div class="module-card">
+      <div class="module-icon">
+        <svg viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1116 0z"/><circle cx="12" cy="10" r="2.5"/></svg>
+      </div>
+      <div class="module-name">Specialist Referral</div>
+      <div class="module-desc">A screening result is not a diagnosis. The app lists real child psychiatrists, neuropsychiatry clinics, and hospital OPDs, with phone numbers and a map.</div>
+      <div class="module-tags">
+        <span class="tag active">Pune clinics</span>
+        <span class="tag active">Phone numbers</span>
+        <span class="tag">Google Maps</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── ANALYZE ── -->
+<section id="analyze">
+  <p class="section-label">Screening Engine</p>
+  <h2 class="section-title">Upload &amp; <em>screen</em></h2>
+  <p class="section-lead">Try a held-out demo or upload your own recording. The server expects channels ordered as Fp1, Fp2, F3, F4, C3, C4, P3, P4, O1, O2, F7, F8, T7, T8, P7, P8, Fz, Cz, Pz.</p>
+
+  <div class="analyze-layout" id="analyzeLayout">
+
+    <!-- LEFT: input -->
+    <div class="upload-panel">
+      <p class="field-label">Run a demo recording</p>
+      <div class="scan-selector">
+        <button class="scan-btn" id="demoAdhd" type="button" onclick="selectDemo('adhd')">
+          <span class="scan-btn-label">Held-out subject · v10p</span>
+          <span class="scan-btn-name">ADHD demo</span>
+        </button>
+        <button class="scan-btn" id="demoControl" type="button" onclick="selectDemo('control')">
+          <span class="scan-btn-label">Held-out subject · v107</span>
+          <span class="scan-btn-name">Control demo</span>
+        </button>
+      </div>
+
+      <p class="field-label">Or upload your own</p>
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" accept=".npy,.csv,.txt,.mat" onchange="handleFile(event)"/>
+        <div class="upload-icon">
+          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+        </div>
+        <div class="upload-title">Drop an EEG recording here</div>
+        <div class="upload-hint">.npy · .csv · .txt · .mat — max 80 MB</div>
+      </div>
+
+      <div class="file-preview" id="filePreview">
+        <div class="file-preview-icon">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>
+        </div>
+        <div class="file-preview-body">
+          <div class="file-preview-name" id="fileName">No recording selected</div>
+          <div class="file-preview-meta" id="fileMeta">Choose a demo or upload a file</div>
+        </div>
+        <button class="file-clear" type="button" id="fileClear" title="Clear selection" onclick="clearSelection()">×</button>
+      </div>
+
+      <label class="field-label" for="sourceFs">Original sampling rate</label>
+      <select class="field-input" id="sourceFs">
+        <option value="128" selected>128 Hz (dataset default)</option>
+        <option value="250">250 Hz</option>
+        <option value="256">256 Hz</option>
+        <option value="500">500 Hz</option>
+        <option value="512">512 Hz</option>
+        <option value="1000">1000 Hz</option>
+      </select>
+      <p class="field-help">The backend resamples to 128 Hz and applies a 0.5–45 Hz band-pass plus a 50 Hz notch.</p>
+
+      <button class="analyze-btn" id="analyzeBtn" type="button" onclick="runAnalysis()" disabled>
+        <div class="spinner" id="spinner"></div>
+        <span id="analyzeBtnText">Run Screening</span>
+      </button>
+      <p class="analyze-status" id="analyzeStatus" aria-live="polite">Demos were excluded from training. Uploads are processed temporarily and are not retained.</p>
+
+      <div class="input-notes">
+        <div class="input-notes-title">Before you upload</div>
+        <ul class="input-notes-list">
+          <li>19 channels in the standard order listed above</li>
+          <li>At least 60 seconds of resting-state EEG</li>
+          <li>Sampling rate matches the original file</li>
+          <li>Treat the score as a screening signal, not a diagnosis</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- RIGHT: results -->
+    <div class="results-panel">
+      <div class="results-empty" id="resultsEmpty">
+        <div class="results-empty-icon">
+          <svg viewBox="0 0 24 24"><path d="M3 12h3l2-6 4 12 3-9 2 3h4"/><path d="M4 20h16"/></svg>
+        </div>
+        <p>Run a screening to see<br/>the EEG signal snapshot and result</p>
+      </div>
+
+      <div class="result-error" id="resultError" role="alert" hidden></div>
+
+      <div class="results-content" id="resultsContent">
+        <div class="result-header">
+          <span class="result-type" id="resultType">EEG · ADHD SCREENING</span>
+          <span class="result-status">
+            <span class="status-dot"></span>
+            Analysis complete
+          </span>
+        </div>
+
+        <div class="verdict">
+          <div class="score-ring" id="scoreRing" title="ADHD-likeness screening score (0–100). Not a calibrated clinical probability.">
+            <div class="score-ring-inner">
+              <span class="score-ring-num" id="resultScore">--</span>
+              <span class="score-ring-label">/ 100 score</span>
+            </div>
+          </div>
+          <div class="verdict-body">
+            <div class="verdict-label" id="resultLabel" aria-live="polite">Waiting for a recording</div>
+            <p class="verdict-text" id="resultText"></p>
+            <div class="verdict-meta" id="resultMeta"></div>
+          </div>
+        </div>
+
+        <div class="probability-list">
+          <div class="probability-item">
+            <div class="probability-row">
+              <span class="probability-name">ADHD-like pattern</span>
+              <span class="probability-pct" id="adhdPct">0%</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill adhd" id="adhdBar"></div></div>
+          </div>
+          <div class="probability-item">
+            <div class="probability-row">
+              <span class="probability-name">Control-like pattern</span>
+              <span class="probability-pct" id="controlPct">0%</span>
+            </div>
+            <div class="bar-track"><div class="bar-fill control" id="controlBar"></div></div>
+          </div>
+        </div>
+
+        <div class="stat-grid" id="resultStats"></div>
+
+        <div class="referral-preview" id="resultReferral" hidden></div>
+
+        <div class="signal-section">
+          <div class="signal-header">
+            <span class="signal-label">Band profile</span>
+            <span class="signal-note">Relative power, averaged over epochs</span>
+          </div>
+          <div class="band-list" id="bandList"></div>
+        </div>
+
+        <div class="signal-section">
+          <div class="signal-header">
+            <span class="signal-label">Strongest connections</span>
+            <span class="signal-note">Mean directed connectivity</span>
+          </div>
+          <div class="edge-list" id="edgeList"></div>
+        </div>
+
+        <div class="disclaimer">⚠ Research and educational use only. This screening score is not a diagnosis and cannot rule ADHD in or out. A qualified clinician must assess attention, history, and behaviour in person.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── SPECIALISTS ── -->
+<section id="specialists">
+  <p class="section-label">Confirm in person</p>
+  <h2 class="section-title">Real specialists, <em>on the map</em></h2>
+  <p class="section-lead">ADHD is diagnosed through clinical history, rating scales, and interviews — not EEG alone. In India it is usually assessed by a child psychiatrist or psychiatrist; neuropsychiatry clinics and hospital psychiatry departments also help. The clinicians below assess ADHD and related concerns. Call before visiting to confirm specialty, fees, and availability.</p>
+
+  <div class="specialist-toolbar">
+    <form class="city-form" id="cityForm" onsubmit="searchCity(event)">
+      <label class="sr-only" for="cityInput">City</label>
+      <input class="field-input city-input" id="cityInput" type="text" value="Pune" maxlength="80" placeholder="City (e.g. Pune, Mumbai)"/>
+      <button class="btn-primary btn-compact" type="submit">Search area</button>
+    </form>
+    <button class="btn-outline btn-compact" type="button" id="locateBtn" onclick="useMyLocation()">Use my location</button>
+    <span class="source-badge" id="doctorSource">LOADING</span>
+  </div>
+
+  <div class="notice" id="doctorNotice">Loading specialist listings…</div>
+
+  <div class="specialist-layout">
+    <div class="doctor-list" id="doctorList"></div>
+
+    <div class="map-panel">
+      <div class="map-frame">
+        <iframe id="mapEmbed" title="Google Map of ADHD specialists" loading="lazy"
+                referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
+      </div>
+      <div class="map-footer">
+        <span class="map-caption" id="mapCaption">ADHD specialists · Pune</span>
+        <a class="map-link" id="mapLink" href="https://www.google.com/maps/search/?api=1&query=ADHD+child+psychiatrist+in+Pune" target="_blank" rel="noopener">Open in Google Maps ↗</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── METHOD ── -->
+<section id="how">
+  <p class="section-label">Methodology</p>
+  <h2 class="section-title">How the <em>screening</em> works</h2>
+
+  <div class="pipeline">
+    <div class="pipeline-step">
+      <div class="step-num">1</div>
+      <div class="step-title">EEG Upload</div>
+      <div class="step-desc">A 19-channel recording is validated and resampled to 128 Hz.</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-num">2</div>
+      <div class="step-title">Preprocessing</div>
+      <div class="step-desc">0.5–45 Hz band-pass, 50 Hz notch, per-epoch z-scoring, and artifact rejection.</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-num">3</div>
+      <div class="step-title">Features</div>
+      <div class="step-desc">Five log band powers and θ/β per channel, relative power, and 171 directed edges.</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-num">4</div>
+      <div class="step-title">SVM Vote</div>
+      <div class="step-desc">SelectKBest(150) → StandardScaler → RBF-SVM scores each 5-second epoch; the subject score is the mean.</div>
+    </div>
+    <div class="pipeline-step">
+      <div class="step-num">5</div>
+      <div class="step-title">Confirm</div>
+      <div class="step-desc">A positive screen points to an in-person clinical assessment — never a self-diagnosis.</div>
+    </div>
+  </div>
+
+  <div class="validation">
+    <div class="validation-head">
+      <div>
+        <p class="section-label">Validation snapshot</p>
+        <h3 class="validation-title">Subject-wise, 3-repeat cross-validation</h3>
+      </div>
+      <div class="model-chip" id="modelMeta">SelectKBest(150) → StandardScaler → RBF-SVM</div>
+    </div>
+    <div class="metric-grid">
+      <div class="metric">
+        <span class="metric-num">69.4%</span>
+        <span class="metric-label">Accuracy</span>
+        <span class="metric-sub">majority vote across 3 repeats</span>
+      </div>
+      <div class="metric">
+        <span class="metric-num">0.747</span>
+        <span class="metric-label">AUROC</span>
+        <span class="metric-sub">95% CI 0.656–0.834</span>
+      </div>
+      <div class="metric">
+        <span class="metric-num">85.2%</span>
+        <span class="metric-label">Sensitivity</span>
+        <span class="metric-sub">ADHD subjects detected</span>
+      </div>
+      <div class="metric">
+        <span class="metric-num">53.3%</span>
+        <span class="metric-label">Specificity</span>
+        <span class="metric-sub">controls correctly cleared</span>
+      </div>
+    </div>
+    <p class="validation-note">Trained on 119 of 121 children; the two demo recordings are excluded so their predictions are out-of-sample. Metrics come from 3-repeat subject-wise CV; the served artifact is a single fit (single-model estimate 66.4% ± 1.3%). Single-site dataset, modest specificity, and a 0.5 threshold mean this model is a research prototype, not a clinical test.</p>
+  </div>
+</section>
+
+<!-- ── TECH STACK ── -->
+<section id="tech">
+  <p class="section-label">Technology Stack</p>
+  <h2 class="section-title">Built with <em>precision</em></h2>
+
+  <div class="tech-grid">
+    <div class="tech-item">
+      <div class="tech-category">Model</div>
+      <div class="tech-name">RBF-SVM</div>
+      <div class="tech-detail">SelectKBest(150) · StandardScaler · probability calibration · class-balanced</div>
+    </div>
+    <div class="tech-item">
+      <div class="tech-category">Signal Processing</div>
+      <div class="tech-name">SciPy + NumPy</div>
+      <div class="tech-detail">Welch PSD · Hilbert band power · Granger VAR connectivity · z-score rejection</div>
+    </div>
+    <div class="tech-item">
+      <div class="tech-category">Validation</div>
+      <div class="tech-name">Subject-wise CV</div>
+      <div class="tech-detail">Stratified 5-fold · 3 repeats · threshold chosen inside training folds</div>
+    </div>
+    <div class="tech-item">
+      <div class="tech-category">Backend</div>
+      <div class="tech-name">FastAPI</div>
+      <div class="tech-detail">REST API · background threadpool · joblib model artifact · CORS</div>
+    </div>
+    <div class="tech-item">
+      <div class="tech-category">Frontend</div>
+      <div class="tech-name">HTML · CSS · JS</div>
+      <div class="tech-detail">Vanilla stack · no framework · responsive dark medical UI</div>
+    </div>
+    <div class="tech-item">
+      <div class="tech-category">Referral Maps</div>
+      <div class="tech-name">Google Maps</div>
+      <div class="tech-detail">Keyless embed/search · optional Places API via GOOGLE_MAPS_API_KEY</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer>
+  <div class="footer-text">© 2026 NeuroScan AI · Bharati Vidyapeeth, Pune</div>
+  <div class="footer-team">
+    <span>Research prototype</span> · Not a medical device · <span>Confirm every result with a clinician</span>
+  </div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

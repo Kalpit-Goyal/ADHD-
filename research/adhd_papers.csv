@@ -1,0 +1,45 @@
+study,year,modality,dataset,n,method,validation,accuracy,auc,notes,pmid,doi
+"Hassan & Singhal",2024,EEG,"IEEE DataPort 121-child (61 ADHD / 60 HC)",121,"2-layer CNN + CCA, 5-s frames","Frame-level; no subject-wise split reported",100,,"Headline only; leakage risk",39224441,10.1007/s13755-024-00305-7
+"Tang et al.",2022,fMRI,"ADHD-200",973,"Autoencoder + binary hypothesis testing","Leave-one-out",99.6,,"Transductive feature selection; likely leakage",34998510,10.1016/j.artmed.2021.102209
+"Bansal et al.",2025,EEG,"IEEE DataPort 121-child",121,"Autoencoder + ResNet + double attention","Not clearly subject-wise",99.42,,"Inflated",39851462,10.3390/brainsci15010095
+"Amini et al. (ADHDeepNet)",2026,EEG,"IEEE DataPort 121-child",121,"Temporal-spatial attention CNN","Nested 10-fold cross-subject",99.17,,"Outlier; same dataset is 72.7% under clean subject-wise evaluation",42899621,10.1088/2057-1976/aeb67a
+"Siamese CNN",2024,EEG,"Public pediatric EEG",n/r,"Siamese CNN on PSD brain maps",n/r,99.17,,"Inflated",39255658,10.1016/j.compbiomed.2024.109092
+"Ni et al. (TFS-FENet)",2025,EEG,"Southeast University 3-class",n/r,"CNN + attention on time-frequency-space features",n/r,99.36 binary / 96.89 3-class,,"Private data; needs replication",41442154,10.1080/21622965.2025.2606108
+"Att-CNN",2024,EEG,"Public EEG",n/r,"PCC + PLV connectivity maps + attention CNN",n/r,98.88,,"Inflated",39422820,10.1007/s12021-024-09685-3
+"ADHD-AttentionNet",2025,EEG,"Public EEG",n/r,"NeuroDCT-ICA + RFO feature selection + attention net",n/r,98.52,,"Inflated",40011599,10.1038/s41598-025-90649-1
+"Spherical phase-space + BiLSTM",2026,EEG,"121 (61 ADHD / 60 HC)",121,"Symbolic time-series analysis + BiLSTM",20-s window-level,98,,"Inflated",42786530,10.1186/s42490-026-00119-6
+"PABiLSTM ensemble",2025,EEG,"Two datasets",n/r,"Spectrogram/fractal/recurrence + ResNet-50 + BiLSTM",n/r,98.91 / 99.10,,"Inflated",41173469,10.1080/10255842.2025.2576625
+"Zavitaev et al.",2026,EEG,"Public EEG",n/r,"Transformer + LIME","Leave-one-out",96.2,,"Likely epoch-level LOO",42468441,10.1016/j.cmpb.2026.109499
+"MCRNet (Sanchis et al.)",2025,EEG,"Public EEG",n/r,"Multi-head CNN + RNN","Cross-subject",94.87,,"More credible; dataset details limited",40752402,10.1016/j.compbiomed.2025.110826
+"CTE-Net (Gomez-Rivera et al.)",2026,EEG,"120 (60 ADHD / 60 HC)",120,"Transformer + directed transfer entropy","5 fixed subject-wise folds x 10 repetitions",83.4,0.902,"Most credible EEG deep-learning result",42817338,10.3390/s26185786
+"Geethapriya & Pattabiraman",2026,EEG,"121 children; 4,173 epochs",121,"LR/RF/SVM; LSTM/CNN/CNN-BiLSTM","Segment-wise vs subject-wise","90.0 -> 65.6 (SVM); CNN 72.7",0.72,"Key leakage benchmark; read first",42903275,10.3389/fnins.2026.1925266
+"Chen et al.",2024,Multimodal EEG,"78 (43 ADHD / 35 TD)",78,"Wearable EEG + K-CPT + rating scales; ensemble","Cross-validation",97.4,,"Small; multimodal",39528958,10.1186/s11689-024-09578-1
+"Brown et al. (ADHD-200 competition)",2012,"fMRI + phenotype","ADHD-200",973,"21 competition teams","Competition holdout",62.52,,"Historical benchmark; phenotype-only won",23060754,10.3389/fnsys.2012.00069
+"DeepFMRI (Riaz et al.)",2020,fMRI,"ADHD-200 NYU",n/r,"End-to-end CNN + functional connectivity","Subject-level",73.1,,"Credible baseline",32001294,10.1016/j.jneumeth.2019.108506
+"3D CNN fALFF/ReHo",2025,fMRI,"ADHD-200 NI/NYU/PU",n/r,"3D CNN",5-fold,76.19 / 69.92 / 70.77,,"Credible",39028358,10.1007/s10278-024-01189-5
+"AE-STEN (Li et al.)",2026,fMRI,"ADHD-200 747 subjects, 7 sites",747,"Attention-enhanced spatiotemporal network","Subject-level",76.06,,"Best realistic multi-site result",41740109,10.1109/JBHI.2026.3668080
+"BrainNetCNN (Lopez et al.)",2026,fMRI,"465 participants, 4 sites",465,"BrainNetCNN + static/dynamic FC","Within-site 10-fold; leave-one-site-out",,50.1-64.5,"Poor cross-site transport",42843755,10.1016/j.neuropsychologia.2026.109601
+"GraphSAGE (Bousmaha et al.)",2026,fMRI,"ADHD-200 multi-site",n/r,"PLV + GraphSAGE","Site and combined",89,0.96,"Outlier; verify site leakage",42194343,10.3390/bioengineering13050586
+"Transformer structural connectivity (Shi et al.)",2025,sMRI,"947 individuals, 8 centres",947,"Transformer on structural connectivity",5-fold,71.9,0.74,"Credible",40676171,10.1038/s43856-025-01015-1
+"Att-GCN",2026,fMRI,"ADHD-200 subsets",n/r,"Graph attention + ALFF/FC","Binary hypothesis",93.1,,"Suspicious 11-region subset; needs replication",41455179,10.1016/j.compbiolchem.2025.108866
+"Gaus et al. (ABCD sMRI)",2023,sMRI,"ABCD",6916,"Advanced ML on 136 regional volume/thickness measures","CV + permutation",,0.567,"Large cohort; weak structural signal",38054056,10.1002/jcv2.12184
+"Wang et al. (ABCD rs-fMRI)",2023,rs-fMRI,"ABCD 775 after QC",775,"Multiple FC measures + multiple-kernel learning","Nested CV",69.16,0.740,"Large cohort; moderate signal",36746929,10.1038/s41398-023-02309-5
+"Tian et al. (meta-analysis)",2024,"sMRI/fMRI","43 studies; 27 pooled",n/a,"Machine learning","Meta-analysis","74 sensitivity / 75 specificity",0.81,"Best summary estimate",38580035,10.1016/j.jad.2024.03.111
+"Deepika et al. (KAN)",2025,fMRI,"ADHD-200",n/r,"Kolmogorov-Arnold network + attention","Benchmark",79.25,,"Efficient; promising",40587919,10.1016/j.pscychresns.2025.112016
+"ESPM-ADHD (Wang et al.)",2026,Questionnaire,"26,726 (15,085 dev; 7,435 + 4,206 external)",26726,"RF/XGBoost/LightGBM/LR on 15 school-home features","External validation",,0.929 / 0.907,"Largest screening model; AUPRC 0.298 / 0.253",41620184,10.1016/j.jad.2026.121247
+"CAT-based model (Cha et al.)",2025,Attention test,"11,429",11429,"8 ML models","5-fold balanced",98,,"Large but balanced; needs replication",40496821,10.3389/fpsyt.2025.1574615
+"SNAP-IV short form",2026,Questionnaire,"4,017 + 1,050",5067,"ML consensus ranking","Cross-validation",,,"Screening; no headline accuracy",42421187,10.1177/10731911261458744
+"VR adult ADHD (Wiebe et al.)",2024,Multimodal VR,"50 train / 36 test",86,"SVM on eye tracking, EEG, actigraphy, behaviour","Independent test",81,,"Good validation practice",39741130,10.1038/s41398-024-03217-y
+"Eye tracking (Liu et al.)",2024,Eye tracking,"216 (94 ADHD / 122 TD)",216,"ML on digital biomarkers","5-fold CV",90.8,0.965,"Promising; single site",39477792,10.2196/58927
+"Eye tracking orienting",2026,Eye tracking,"46 (19 ADHD / 27 TD)",46,"Logistic regression","Cross-validation",84-87,,"Small",41748846,
+"VR-EEG-oculomotor (Lin et al.)",2026,Multimodal VR,"101 (64 ADHD / 37 control)",101,"DNN early fusion","5-fold",83,,"Good multimodal example",42623203,10.1109/TBME.2026.3725610
+"Wearable physiological (Andrikopoulos et al.)",2024,"EDA/HRV","76 adults (32 ADHD / 44 HC)",76,SVM,"Cross-validation",81.6,,"Small",39103819,10.1186/s12888-024-05987-7
+"Fitbit + ABCD (Kim et al.)",2023,Wearable,"1,090 analysed (79 ADHD / 1,011 controls)",1090,"ML on circadian/wearable features","Cross-validation",,0.798,"Large; PPV 0.159",36930149,10.1001/jamanetworkopen.2023.3502
+"Fitbit + ABCD (Rahman)",2025,Wearable,"ABCD 450",450,"Random Forest","Cross-validation",89,0.95,"Small subset; inflated vs larger ABCD",40487008,10.3389/frcha.2025.1504323
+"ECG 1D CNN (Loh et al.)",2023,ECG,"123 children",123,"1D CNN on 2-s ECG epochs","Epoch-level",96.04,,"Inflated",37651817,10.1016/j.cmpb.2023.107775
+"BALLADEER dataset",2026,"EEG/eye tracking/EDA",n/r,n/r,"Dataset paper","Dataset paper",,,"New public multimodal resource",41680221,
+"VoxSTNet",2026,fMRI,"Multi-site raw BOLD",n/r,"3D CNN + spatiotemporal","Subject-wise z-score",,,"Emerging",42454147,
+"BRAINMAP",2026,fMRI,"447 ADHD + 845 TDC (3 datasets)",1292,"Dynamic FC + GNN + Mamba","Multi-dataset",,,"Emerging",41712397,10.1109/JBHI.2026.3666277
+"Multimodal review (Walle & Bargshady)",2026,Review,"25 studies",25,"Systematic review","PRISMA",,,"Most >80%",42881698,10.3390/healthcare14193259
+"rs-fMRI review",2024,Review,"ADHD-200 focused",n/r,Review,n/a,,,"Good starting point",38472163,10.1002/nbm.5138
+"Scoping review",2025,Review,"42 studies",42,"Scoping review","PRISMA-ScR",,,"RF/SVM dominate",41438910,10.1002/hsr2.71679

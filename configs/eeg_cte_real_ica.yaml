@@ -1,0 +1,51 @@
+data:
+  root: data/real
+  manifest: manifest.csv
+  n_channels: 19
+  fs: 128
+  epoch_seconds: 5.0
+  overlap: 0.0
+  bandpass: [0.5, 45.0]
+  notch: 50.0
+  max_abs_uv: null
+  max_abs_z: 10.0
+  artifact_removal: ica
+  blink_channels: [0, 1]  # Fp1, Fp2
+  ica_max_components: 2
+  ica_blink_corr: 0.5
+  connectivity: granger
+  var_order: 5
+
+features:
+  bands:
+    delta: [1.0, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta: [13.0, 30.0]
+    gamma: [30.0, 45.0]
+
+model:
+  name: cte_net
+  d_model: 64
+  n_heads: 4
+  n_layers: 2
+  dropout: 0.25
+  eegnet_f1: 8
+  eegnet_d: 2
+  eegnet_f2: 16
+  eegnet_kernel: 64
+
+training:
+  n_splits: 5
+  val_size: 0.2
+  batch_size: 32
+  epochs: 60
+  patience: 12
+  lr: 0.001
+  weight_decay: 0.0001
+  seed: 42
+  num_workers: 0
+  device: auto
+
+output:
+  dir: results/cte_net_real_ica
