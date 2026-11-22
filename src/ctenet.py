@@ -249,8 +249,8 @@ class DifferentiableTransferEntropy(nn.Module):
         out = []
         for i in range(self.embed_dim):
             start = (self.embed_dim - 1 - i) * self.embed_delay
-            end = n_times - (self.embed_dim - 1) * self.delay if False else n_times - (self.embed_dim - 1) * self.embed_delay
-            out.append(signal[:, start : start + n_times - (self.embed_dim - 1) * self.embed_delay])
+            end = start + n_times - (self.embed_dim - 1) * self.embed_delay
+            out.append(signal[:, start:end])
         return torch.stack(out, dim=1)
 
 

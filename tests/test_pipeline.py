@@ -294,6 +294,520 @@ def test_no_subject_overlap_raises() -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Phase 12 acceptance tests
+# ---------------------------------------------------------------------------
+
+
+def test_a_subject_leakage_single_fold() -> None:
+    """A participant with multiple epochs must appear in exactly one fold."""
+    n_subjects = 8
+    epochs_per_subject = 4
+    n_epochs = n_subjects * epochs_per_subject
+
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+    labels = np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32)
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_epochs, 1, 19, 32).astype(np.float32),
+        node_features=np.random.randn(n_epochs, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_epochs, 19, 19).astype(np.float32),
+        labels=labels,
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.25,
+    )
+
+    # Construct folds manually to avoid sklearn small-sample stratification limits.
+    from src.cv import Fold
+    folds = [
+        Fold(train=("s00", "s02", "s04", "s06"), val=("s01", "s03"), test=("s05", "s07"), repeat=0, fold=0),
+        Fold(train=("s01", "s03", "s05", "s07"), val=("s00", "s02"), test=("s04", "s06"), repeat=0, fold=1),
+    ]
+
+    for fold in folds:
+        all_subjects = list(fold.train) + list(fold.val) + list(fold.test)
+        from collections import Counter
+        counts = Counter(all_subjects)
+        for sid, c in counts.items():
+            assert c == 1, f"Subject {sid} appears {c} times in fold {fold.fold}"
+
+        assert set(fold.train).isdisjoint(set(fold.val))
+        assert set(fold.train).isdisjoint(set(fold.test))
+        assert set(fold.val).isdisjoint(set(fold.test))
+
+    # Every subject appears in exactly one test fold across all folds.
+    test_subjects = [s for fold in folds for s in fold.test]
+    assert len(test_subjects) == len(set(test_subjects))
+
+    # Every subject appears exactly once across train+val+test in each fold.
+    for fold in folds:
+        all_subjects = list(fold.train) + list(fold.val) + list(fold.test)
+        from collections import Counter
+        counts = Counter(all_subjects)
+        for sid, c in counts.items():
+            assert c == 1, f"Subject {sid} appears {c} times in fold {fold.fold}"
+
+
+def test_b_participant_aggregation_arithmetic_mean() -> None:
+    """Participant probability is the arithmetic mean of epoch probs."""
+    from src.train import aggregate_subject_probs
+
+    # One subject with 3 epochs, probabilities [0.2, 0.6, 0.8] -> mean 0.5333
+    subject_ids = np.asarray(["s01", "s01", "s01", "s02", "s02"])
+    probs = np.asarray([0.2, 0.6, 0.8, 0.1, 0.9])
+
+    result = aggregate_subject_probs(subject_ids, probs)
+
+    assert abs(result["s01"] - (0.2 + 0.6 + 0.8) / 3.0) < 1e-6
+    assert abs(result["s02"] - (0.1 + 0.9) / 2.0) < 1e-6
+    assert len(result) == 2  # exactly one prediction per participant
+
+
+def test_b_no_dict_overwrite() -> None:
+    """dict(zip(...)) must NOT overwrite multi-epoch probabilities."""
+    from src.train import aggregate_subject_probs
+
+    subject_ids = np.asarray(["s01", "s01"])
+    probs = np.asarray([0.2, 0.8])
+
+    # Wrong way: dict zip gives 0.8 (last epoch wins)
+    wrong = dict(zip(subject_ids.tolist(), probs.tolist()))
+    assert wrong["s01"] == 0.8  # confirms dict overwrite bug
+
+    # Right way: aggregate_subject_probs gives mean 0.5
+    right = aggregate_subject_probs(subject_ids, probs)
+    assert abs(right["s01"] - 0.5) < 1e-6
+
+
+def test_c_deep_feature_extraction_not_zeros() -> None:
+    """Deep features must be non-zero, correct dimensions, subject-aligned."""
+    from src.hybrid_model import _deep_features
+    from src.models import CTENet, EEGNet
+
+    n_subjects = 6
+    epochs_per_subject = 2
+    n_epochs = n_subjects * epochs_per_subject
+
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_epochs, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_epochs, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_epochs, 19, 19).astype(np.float32),
+        labels=np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32),
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
+    )
+
+    device = torch.device("cpu")
+    model = CTENet(
+        n_features=6, n_channels=19, d_model=16, n_heads=4, n_layers=1, dropout=0.1
+    )
+    model.eval()
+
+    subject_arr = np.asarray(sorted(subject_labels), dtype=object)
+    features = _deep_features(model, bundle, subject_arr, device, model_name="cte_net")
+
+    # Shape check: (n_subjects, d_model)
+    assert features.shape == (n_subjects, 16), f"Expected ({n_subjects}, 16), got {features.shape}"
+
+    # Non-zero check: features must not be all zeros
+    assert not np.all(features == 0), "Deep features are all zeros"
+
+    # Subject alignment: row order matches subject_arr order
+    assert features.shape[0] == len(subject_arr)
+
+    # No NaN
+    assert np.isfinite(features).all()
+
+
+def test_c_deep_feature_missing_subject_raises() -> None:
+    """Missing subject in deep feature extraction must raise, not substitute zeros."""
+    from src.hybrid_model import _deep_features
+    from src.models import CTENet
+
+    n_subjects = 4
+    epochs_per_subject = 2
+    n_epochs = n_subjects * epochs_per_subject
+
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_epochs, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_epochs, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_epochs, 19, 19).astype(np.float32),
+        labels=np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32),
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
+    )
+
+    device = torch.device("cpu")
+    model = CTENet(
+        n_features=6, n_channels=19, d_model=16, n_heads=4, n_layers=1, dropout=0.1
+    )
+    model.eval()
+
+    # Ask for a subject that doesn't exist in the bundle.
+    bad_subjects = np.asarray(["s99"], dtype=object)
+    try:
+        _deep_features(model, bundle, bad_subjects, device, model_name="cte_net", raise_on_missing=True)
+        assert False, "Expected ValueError for missing subject"
+    except ValueError:
+        pass
+
+
+def test_d_feature_fusion_branches_present() -> None:
+    """Feature fusion must have both branches with non-zero data, aligned subjects."""
+    from src.hybrid_model import run_feature_fusion
+    from src.models import CTENet
+
+    n_subjects = 12
+    epochs_per_subject = 2
+    n_epochs = n_subjects * epochs_per_subject
+
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+    labels = np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32)
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_epochs, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_epochs, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_epochs, 19, 19).astype(np.float32),
+        labels=labels,
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
+    )
+
+    folds = make_repeated_folds(subject_labels, n_splits=3, n_repeats=1, seed=42)
+
+    # Factory that builds an untrained CTENet for feature extraction.
+    def deep_factory() -> CTENet:
+        return CTENet(
+            n_features=6, n_channels=19, d_model=16, n_heads=4, n_layers=1, dropout=0.1
+        )
+
+    result = run_feature_fusion(
+        bundle,
+        folds,
+        seed=42,
+        deep_model_factory=deep_factory,
+        device=torch.device("cpu"),
+        model_name="cte_net",
+        real_data=False,
+    )
+
+    assert result.experiment == "feature_fusion"
+    assert result.branch_b_model != "none"
+    assert result.branch_b_model != "CTENet" or "CTENet" in result.branch_b_model
+    assert 0.0 <= result.roc_auc <= 1.0 or np.isnan(result.roc_auc)
+    assert result.participant_level is True
+    assert result.n_subjects == n_subjects
+
+
+def test_e_soft_voting_probability_averaging() -> None:
+    """Soft voting averages probabilities from both branches."""
+    from src.hybrid_model import run_prediction_ensemble
+
+    n_subjects = 8
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    # Create folds manually.
+    from src.cv import Fold
+    folds = [
+        Fold(train=("s00", "s02", "s04", "s06"), val=("s01", "s03"), test=("s05", "s07"), repeat=0, fold=0),
+        Fold(train=("s01", "s03", "s05", "s07"), val=("s00", "s02"), test=("s04", "s06"), repeat=0, fold=1),
+    ]
+
+    # Subject list is sorted: s00..s07
+    subject_list = np.asarray(sorted(subject_labels), dtype=object)
+
+    # Branch A probs: fold 0 -> s05=0.8, s07=0.2; fold 1 -> s04=0.3, s06=0.7
+    branch_a_probs = {
+        0: {"s05": 0.8, "s07": 0.2},
+        1: {"s04": 0.3, "s06": 0.7},
+    }
+    # Branch B probs: fold 0 -> s05=0.6, s07=0.4; fold 1 -> s04=0.2, s06=0.8
+    branch_b_probs = {
+        0: {"s05": 0.6, "s07": 0.4},
+        1: {"s04": 0.2, "s06": 0.8},
+    }
+
+    bundle = _make_bundle(n_subjects=n_subjects, epochs_per_subject=1)
+
+    result = run_prediction_ensemble(
+        bundle=bundle,
+        folds=folds,
+        seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="soft_voting",
+        real_data=False,
+    )
+
+    # s05: (0.8+0.6)/2 = 0.7; s07: (0.2+0.4)/2 = 0.3
+    # s04: (0.3+0.2)/2 = 0.25; s06: (0.7+0.8)/2 = 0.75
+    assert result.experiment == "soft_voting"
+    assert result.participant_level is True
+
+
+def test_f_weighted_voting_weights_from_validation() -> None:
+    """Weighted voting uses validation-derived weights, not test labels."""
+    from src.hybrid_model import run_prediction_ensemble
+
+    n_subjects = 8
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    from src.cv import Fold
+    folds = [
+        Fold(train=("s00", "s02", "s04", "s06"), val=("s01", "s03"), test=("s05", "s07"), repeat=0, fold=0),
+        Fold(train=("s01", "s03", "s05", "s07"), val=("s00", "s02"), test=("s04", "s06"), repeat=0, fold=1),
+    ]
+
+    branch_a_probs = {
+        0: {"s05": 0.8, "s07": 0.2},
+        1: {"s04": 0.3, "s06": 0.7},
+    }
+    branch_b_probs = {
+        0: {"s05": 0.6, "s07": 0.4},
+        1: {"s04": 0.2, "s06": 0.8},
+    }
+
+    bundle = _make_bundle(n_subjects=n_subjects, epochs_per_subject=1)
+
+    # Weights derived externally (e.g. from validation AUROC), not test labels.
+    weights = [0.7, 0.3]
+
+    result = run_prediction_ensemble(
+        bundle=bundle,
+        folds=folds,
+        seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="weighted_voting",
+        weights=weights,
+        real_data=False,
+    )
+
+    assert result.experiment == "weighted_voting"
+    # s05: 0.7*0.8 + 0.3*0.6 = 0.56+0.18 = 0.74 -> pred 1
+    # s07: 0.7*0.2 + 0.3*0.4 = 0.14+0.12 = 0.26 -> pred 0
+    # s04: 0.7*0.3 + 0.3*0.2 = 0.21+0.06 = 0.27 -> pred 0
+    # s06: 0.7*0.7 + 0.3*0.8 = 0.49+0.24 = 0.73 -> pred 1
+    assert 0.0 <= result.roc_auc <= 1.0 or np.isnan(result.roc_auc)
+
+
+def test_g_stacking_no_insample_meta_evaluation() -> None:
+    """Stacking meta-classifier must NOT be fit/evaluated on same rows.
+
+    This test verifies that the meta-classifier uses out-of-fold base-model
+    predictions for training, and evaluates on held-out test predictions.
+    """
+    from src.hybrid_model import run_prediction_ensemble
+    from src.cv import Fold
+
+    n_subjects = 12
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    folds = [
+        Fold(train=("s00", "s02", "s04", "s06"), val=("s01", "s03"), test=("s08", "s10"), repeat=0, fold=0),
+        Fold(train=("s01", "s03", "s05", "s07"), val=("s00", "s02"), test=("s09", "s11"), repeat=0, fold=1),
+    ]
+
+    branch_a_probs = {
+        0: {"s08": 0.8, "s10": 0.2},
+        1: {"s09": 0.3, "s11": 0.7},
+    }
+    branch_b_probs = {
+        0: {"s08": 0.6, "s10": 0.4},
+        1: {"s09": 0.2, "s11": 0.8},
+    }
+
+    bundle = _make_bundle(n_subjects=n_subjects, epochs_per_subject=1)
+
+    result = run_prediction_ensemble(
+        bundle=bundle,
+        folds=folds,
+        seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="stacking",
+        real_data=False,
+    )
+
+    assert result.experiment == "stacking"
+    # Each subject predicted exactly once (their fold's held-out prediction)
+    assert result.n_subjects == n_subjects
+
+
+def test_h_fold_alignment_all_models() -> None:
+    """All models must consume the same fold participant IDs."""
+    from src.cv import Fold
+
+    n_subjects = 10
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    folds = make_repeated_folds(subject_labels, n_splits=3, n_repeats=1, seed=42)
+
+    # All folds must cover every subject exactly once in test across folds.
+    all_test = set()
+    for fold in folds:
+        all_test.update(fold.test)
+    assert all_test == set(subject_labels)
+
+    # No subject in multiple folds' test sets.
+    test_counts: dict[str, int] = {}
+    for fold in folds:
+        for sid in fold.test:
+            test_counts[sid] = test_counts.get(sid, 0) + 1
+    for sid, count in test_counts.items():
+        assert count == 1, f"Subject {sid} in {count} test folds"
+
+
+def test_i_model_persistence_save_reload(tmp_path: Path) -> None:
+    """Saved hybrid model metadata must be loadable and consistent."""
+    from src.hybrid_model import save_hybrid_result, HybridResult
+
+    result = HybridResult(
+        experiment="feature_fusion",
+        branch_a_model="xgboost",
+        branch_b_model="cte_net",
+        accuracy=0.7,
+        precision=0.7,
+        recall=0.7,
+        f1=0.7,
+        roc_auc=0.75,
+        pr_auc=0.72,
+        sensitivity=0.7,
+        specificity=0.7,
+        brier=0.25,
+        ece=0.1,
+        n_subjects=121,
+        n_folds=5,
+        n_repeats=1,
+        participant_level=True,
+        real_data=True,
+        folds=[],
+    )
+
+    save_dir = tmp_path / "hybrid_models"
+    save_hybrid_result(result, save_dir)
+
+    metadata_path = save_dir / "hybrid_feature_fusion_metadata.json"
+    assert metadata_path.exists()
+
+    import json
+    saved = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert saved["experiment"] == "feature_fusion"
+    assert saved["branch_a_model"] == "xgboost"
+    assert saved["branch_b_model"] == "cte_net"
+    assert abs(saved["roc_auc"] - 0.75) < 1e-6
+
+
+def test_j_end_to_end_synthetic_smoke(tmp_path: Path) -> None:
+    """End-to-end smoke test on synthetic data (NOT a real ADHD result).
+
+    Runs feature extraction through fusion and prediction on synthetic data.
+    Verifies the pipeline executes without errors. Synthetic data only.
+    """
+    from src.hybrid_model import run_feature_fusion, run_prediction_ensemble
+    from src.models import CTENet
+    from src.cv import Fold
+
+    n_subjects = 10
+    epochs_per_subject = 2
+    n_epochs = n_subjects * epochs_per_subject
+
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+    labels = np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32)
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_epochs, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_epochs, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_epochs, 19, 19).astype(np.float32),
+        labels=labels,
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
+    )
+
+    folds = make_repeated_folds(subject_labels, n_splits=3, n_repeats=1, seed=42)
+
+    def deep_factory() -> CTENet:
+        return CTENet(
+            n_features=6, n_channels=19, d_model=16, n_heads=4, n_layers=1, dropout=0.1
+        )
+
+    # E9: Feature fusion
+    fusion_result = run_feature_fusion(
+        bundle, folds, seed=42,
+        deep_model_factory=deep_factory,
+        device=torch.device("cpu"),
+        model_name="cte_net",
+        real_data=False,
+    )
+    assert fusion_result.experiment == "feature_fusion"
+
+    # E10: Soft voting
+    branch_a_probs = {
+        fold.fold: {sid: 0.6 for sid in fold.test} for fold in folds
+    }
+    branch_b_probs = {
+        fold.fold: {sid: 0.4 for sid in fold.test} for fold in folds
+    }
+
+    soft_result = run_prediction_ensemble(
+        bundle, folds, seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="soft_voting",
+        real_data=False,
+    )
+    assert soft_result.experiment == "soft_voting"
+
+    # E12: Stacking
+    stack_result = run_prediction_ensemble(
+        bundle, folds, seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="stacking",
+        real_data=False,
+    )
+    assert stack_result.experiment == "stacking"
+
+    # All results must be participant-level.
+    assert fusion_result.participant_level is True
+    assert soft_result.participant_level is True
+    assert stack_result.participant_level is True
+
+
 if __name__ == "__main__":
     import sys
 

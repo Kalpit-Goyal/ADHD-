@@ -259,13 +259,13 @@ Subject-wise 5-fold CV on 121 subjects (2,918 epochs). Feature sets: `node` = pe
 
 | Exp | Model | AUROC | Accuracy | Sensitivity | Specificity | Notes |
 |-----|-------|-------|----------|-------------|-------------|-------|
-| E6 | EEGNet (raw CNN) | **0.770** | **0.694** | **0.738** | **0.650** | Raw-signal CNN, best overall |
-| E7 | CTE-Net Original | — | — | — | — | Not trainable — architectural mismatch |
+| E6 | EEGNet (raw CNN) | 0.772 | 0.719 | 0.738 | 0.700 | Raw-signal CNN, best overall |
+| E7 | CTE-Net Original | — | — | — | — | Not trainable on CPU — O(C^2·T·embed) TE computation prohibitive; architecture registered in build_model() |
 | E8 | CTE-Net Inspired | 0.609 | 0.554 | 0.574 | 0.533 | Graph-attention model from src/models.py |
 
-**Best deep:** EEGNet (AUROC 0.770) — outperforms all classical and hybrid approaches.
+**Best deep:** EEGNet (AUROC 0.772) — outperforms all classical and hybrid approaches.
 
-The CTE-Net original (Paper 2's faithful reconstruction with differentiable TE, Rényi entropy, rational quadratic kernel, Takens embeddings) was implemented in `src/ctenet.py` but could not be trained because the existing pipeline provides band-power features `(C, F)` while CTENetOriginal expects raw EEG `(B, C, T)`.
+CTENet Original (Paper 2's faithful reconstruction with differentiable TE, Rényi entropy, rational quadratic kernel, Takens embeddings) was implemented in `src/ctenet.py` and is importable via `build_model(name="ctenet_original")`, but full training was not completed on CPU due to computational cost.
 
 ---
 
@@ -273,12 +273,14 @@ The CTE-Net original (Paper 2's faithful reconstruction with differentiable TE, 
 
 | Exp | Method | Branch A | Branch B | AUROC | Accuracy | Sensitivity | Specificity |
 |-----|--------|----------|----------|-------|----------|-------------|-------------|
-| E9 | Feature fusion | XGBoost | none | **0.653** | **0.620** | **0.738** | 0.500 |
-| E10 | Soft voting | XGBoost | CTE-Net | 0.620 | 0.570 | 0.574 | 0.567 |
-| E11 | Weighted voting | XGBoost | CTE-Net | 0.627 | 0.595 | 0.672 | 0.517 |
-| E12 | Stacking | XGBoost | CTE-Net | 0.650 | 0.603 | 0.689 | 0.517 |
+| E9 | Feature fusion | XGBoost | CTENet | 0.670 | 0.636 | 0.738 | 0.533 |
+| E10 | Soft voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E11 | Weighted voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E12 | Stacking | XGBoost | CTENet | 0.673 | 0.603 | 0.672 | 0.533 |
 
-Feature fusion (E9) achieves the best hybrid AUROC (0.653) and accuracy (0.620). Stacking (E12) is close behind with better balance. Hybrid methods do not outperform the best single model (EEGNet at 0.770 AUROC).
+All hybrid experiments use subject-wise 5-fold CV with identical folds. Deep model is trained per fold on training subjects only, with validation for early stopping. Meta-classifiers use nested CV — never trained/evaluated on same rows.
+
+Hybrid methods do not outperform the best single model (EEGNet at 0.772 AUROC).
 
 ---
 

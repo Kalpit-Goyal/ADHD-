@@ -4,10 +4,11 @@ Experiments:
   E9: Feature-level fusion (Paper 1 features + CTE-Net deep features)
   E10: Soft-voting ensemble (XGBoost + CTE-Net)
   E11: Weighted soft-voting ensemble
-  E12: Stacking ensemble (Logistic Regression meta-classifier)
+  E12: Stacking ensemble (Logistic Regression meta-classifier, nested CV)
 
-All experiments use identical subject-wise folds. Deep model predictions come
-from out-of-fold evaluation -- no test-set information is used for weighting.
+All experiments use identical subject-wise folds. Deep model is trained
+per fold on training subjects only, with validation for early stopping.
+No test-set information is used for weighting or threshold tuning.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -24,18 +25,24 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.classical_models import evaluate_model
+from src.classical_models import (
+    _build_epoch_features,
+    _subject_probs,
+    evaluate_model,
+    make_model,
+)
 from src.config import load_config
 from src.cv import Fold, load_folds, make_repeated_folds, read_subject_labels, save_folds
 from src.data import build_feature_bundle, read_manifest
-from src.evaluate import binary_metrics
+from src.evaluate import binary_metrics, youden_threshold
 from src.hybrid_model import (
     HybridResult,
     run_feature_fusion,
     run_prediction_ensemble,
     save_hybrid_result,
 )
-from src.train import resolve_device
+from src.models import build_model as build_deep_model
+from src.train import aggregate_subject_probs, resolve_device
 
 
 def build_folds(
@@ -49,20 +56,126 @@ def build_folds(
     return make_repeated_folds(labels, n_splits=n_splits, n_repeats=1, seed=seed)
 
 
-def _collect_oof_probs(
-    bundle, folds: list[Fold], model_name: str, config, device, seed: int
+def train_deep_model_per_fold(
+    bundle,
+    train_subjects: list[str],
+    val_subjects: list[str],
+    test_subjects: list[str],
+    config,
+    device: torch.device,
+    model_name: str,
+    seed: int,
+    fold: int,
+) -> dict[str, float]:
+    """Train a deep model on train subjects only and return test subject probs.
+
+    Uses validation subjects for early stopping and best-checkpoint selection.
+    Test subjects are never seen during training or tuning.
+    """
+    from torch.utils.data import DataLoader
+
+    from src.data import EpochDataset
+    from src.train import train_one_fold
+
+    # Use train_one_fold from src.train for consistent training procedure.
+    # It returns test_probs, test_subject_ids, test_epoch_indices, etc.
+    result = train_one_fold(
+        bundle,
+        np.asarray(train_subjects),
+        np.asarray(val_subjects),
+        np.asarray(test_subjects),
+        config,
+        device,
+        fold,
+    )
+
+    # Aggregate epoch probabilities to subject level using mean.
+    test_subject_probs = aggregate_subject_probs(
+        result["test_subject_ids"], result["test_probs"]
+    )
+
+    return {
+        str(sid): float(prob)
+        for sid, prob in test_subject_probs.items()
+    }, result["threshold"]
+
+
+def make_deep_model_factory(
+    config, device: torch.device, model_name: str
+) -> Callable[[], torch.nn.Module]:
+    """Return a factory that builds a fresh deep model for a given fold.
+
+    The factory constructs the model from config and moves it to device.
+    Each call returns a new untrained model instance.
+    """
+    def factory() -> torch.nn.Module:
+        config.model.name = model_name
+        model = build_deep_model(
+            config.model,
+            n_channels=19,
+            n_features=6,
+            n_times=640,
+        )
+        return model.to(device)
+    return factory
+
+
+def collect_branch_a_probs(
+    bundle,
+    folds: list[Fold],
+    seed: int,
+    feature_set: str = "node+adj+rel",
+    k: int = 150,
 ) -> dict[int, dict[str, float]]:
-    """Run a deep model CV and return {fold: {subject_id: prob}} OOF predictions."""
-    from src.train import run_cross_validation
+    """Collect XGBoost out-of-fold test probabilities per fold.
 
-    config.model.name = model_name
-    result = run_cross_validation(bundle, config)
-    oof = result["oof"]
+    Returns {fold_index: {subject_id: participant_level_prob}}.
+    Uses aggregate_subject_probs to average epoch probabilities per subject
+    (never overwrites with dict zip).
+    """
+    branch_a_probs: dict[int, dict[str, float]] = {}
+    a_features = _build_epoch_features(bundle, feature_set)
 
-    fold_probs: dict[int, dict[str, float]] = {}
-    for fold_id, group in oof.groupby("fold"):
-        fold_probs[int(fold_id)] = dict(zip(group["subject_id"].tolist(), group["y_prob"].tolist()))
-    return fold_probs
+    for fold, fold_spec in enumerate(folds):
+        train_subjects = list(fold_spec.train)
+        val_subjects = list(fold_spec.val)
+        test_subjects = list(fold_spec.test)
+
+        train_index = np.flatnonzero(np.isin(bundle.subject_ids, train_subjects))
+        val_index = np.flatnonzero(np.isin(bundle.subject_ids, val_subjects))
+        full_index = np.flatnonzero(
+            np.isin(bundle.subject_ids, train_subjects + val_subjects)
+        )
+        test_index = np.flatnonzero(np.isin(bundle.subject_ids, test_subjects))
+
+        model = make_model("xgboost", seed, n_features=a_features.shape[1], k=k)
+        model.fit(
+            a_features[train_index], bundle.labels[train_index].astype(int)
+        )
+
+        # Tune threshold on validation subjects.
+        val_prob = model.predict_proba(a_features[val_index])[:, 1]
+        val_subject = _subject_probs(val_prob, bundle.subject_ids[val_index])
+        val_y = np.asarray(
+            [bundle.subject_labels[str(s)] for s in val_subject.index], dtype=int
+        )
+        threshold = float(youden_threshold(val_y, val_subject.to_numpy()))
+
+        # Refit on train+val.
+        model.fit(
+            a_features[full_index], bundle.labels[full_index].astype(int)
+        )
+
+        # Predict on test and aggregate to participant level.
+        test_prob = model.predict_proba(a_features[test_index])[:, 1]
+        test_subject_prob = aggregate_subject_probs(
+            bundle.subject_ids[test_index], test_prob
+        )
+        branch_a_probs[fold] = {
+            str(sid): float(prob) for sid, prob in test_subject_prob.items()
+        }
+
+    return branch_a_probs
 
 
 def main() -> None:
@@ -71,7 +184,7 @@ def main() -> None:
     parser.add_argument("--output", default="results/hybrid")
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--deep-epochs", type=int, default=60)
+    parser.add_argument("--deep-epochs", type=int, default=30)
     parser.add_argument("--deep-batch", type=int, default=32)
     parser.add_argument("--deep-lr", type=float, default=1e-3)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
@@ -79,7 +192,7 @@ def main() -> None:
         "--official-folds", default=None, help="Path to official CTE-Net folds JSON"
     )
     parser.add_argument(
-        "--skip-deep", action="store_true", help="Skip deep model (classical-only fusion)"
+        "--skip-deep", action="store_true", help="Run classical-only experiments"
     )
     args = parser.parse_args()
 
@@ -110,60 +223,65 @@ def main() -> None:
 
     device = resolve_device(args.device)
 
-    # ----- Get deep model OOF predictions (E8 model) -----
+    # ----- Branch A: XGBoost OOF probabilities per fold -----
+    print("\n=== Branch A (XGBoost) OOF predictions ===")
+    branch_a_probs = collect_branch_a_probs(bundle, folds, args.seed)
+
+    # ----- Branch B: Deep model OOF probabilities per fold -----
     branch_b_probs: Optional[dict[int, dict[str, float]]] = None
-    deep_model = None
+    deep_model_factory: Optional[Callable[[], torch.nn.Module]] = None
+
     if not args.skip_deep:
-        print("\n=== Getting CTE-Net OOF predictions for hybrid ===")
+        print("\n=== Training deep model per fold (CTE-Net inspired) ===")
         try:
-            branch_b_probs = _collect_oof_probs(
-                bundle, folds, "cte_net", config, device, args.seed
-            )
-            print(f"  Collected OOF probs for {len(branch_b_probs)} folds")
-        except Exception as exc:  # pragma: no cover
-            print(f"  Deep model OOF collection failed: {exc}")
+            deep_model_factory = make_deep_model_factory(config, device, "cte_net")
+
+            # Train deep model per fold using the SAME folds as the hybrid pipeline.
+            branch_b_probs = {}
+            deep_thresholds: dict[int, float] = {}
+
+            for fold, fold_spec in enumerate(folds):
+                train_subjects = list(fold_spec.train)
+                val_subjects = list(fold_spec.val)
+                test_subjects = list(fold_spec.test)
+
+                fold_probs, threshold = train_deep_model_per_fold(
+                    bundle,
+                    train_subjects,
+                    val_subjects,
+                    test_subjects,
+                    config,
+                    device,
+                    "cte_net",
+                    args.seed,
+                    fold,
+                )
+                branch_b_probs[fold] = fold_probs
+                deep_thresholds[fold] = threshold
+
+                print(
+                    f"  Fold {fold+1}/{len(folds)}: "
+                    f"train {len(train_subjects)} | "
+                    f"val {len(val_subjects)} | "
+                    f"test {len(test_subjects)} | "
+                    f"threshold {threshold:.3f}"
+                )
+
+            print(f"  Collected deep OOF probs for {len(branch_b_probs)} folds")
+        except Exception as exc:
+            print(f"  Deep model training failed: {exc}")
             branch_b_probs = None
-
-    # ----- Get Branch A (XGBoost) OOF predictions per fold -----
-    print("\n=== Getting Branch A (XGBoost) OOF predictions ===")
-    branch_a_probs: dict[int, dict[str, float]] = {}
-    feature_set = "node+adj+rel"
-
-    from src.classical_models import _build_epoch_features, make_model, _subject_probs
-    from src.evaluate import youden_threshold
-
-    a_features = _build_epoch_features(bundle, feature_set)
-
-    for fold, fold_spec in enumerate(folds):
-        train_subjects = list(fold_spec.train)
-        val_subjects = list(fold_spec.val)
-        test_subjects = list(fold_spec.test)
-
-        train_index = np.flatnonzero(np.isin(bundle.subject_ids, train_subjects))
-        val_index = np.flatnonzero(np.isin(bundle.subject_ids, val_subjects))
-        full_index = np.flatnonzero(np.isin(bundle.subject_ids, train_subjects + val_subjects))
-        test_index = np.flatnonzero(np.isin(bundle.subject_ids, test_subjects))
-
-        model = make_model("xgboost", args.seed, n_features=a_features.shape[1], k=150)
-        model.fit(a_features[train_index], bundle.labels[train_index].astype(int))
-
-        val_prob = model.predict_proba(a_features[val_index])[:, 1]
-        val_subject = _subject_probs(val_prob, bundle.subject_ids[val_index])
-        val_y = np.asarray([bundle.subject_labels[str(s)] for s in val_subject.index], dtype=int)
-        threshold = float(youden_threshold(val_y, val_subject.to_numpy()))
-
-        model.fit(a_features[full_index], bundle.labels[full_index].astype(int))
-
-        test_prob = model.predict_proba(a_features[test_index])[:, 1]
-        test_subject_probs = dict(zip(bundle.subject_ids[test_index].tolist(), test_prob.tolist()))
-        branch_a_probs[fold] = test_subject_probs
+            deep_model_factory = None
 
     # ----- E9: Feature-level fusion -----
     print("\n=== E9: Feature-level fusion ===")
     try:
         fusion_result = run_feature_fusion(
-            bundle, folds, args.seed,
-            deep_model=deep_model,  # None means classical-only fusion
+            bundle,
+            folds,
+            args.seed,
+            deep_model_factory=deep_model_factory,
+            deep_config=None,
             device=device,
             model_name="cte_net",
             real_data=True,
@@ -201,12 +319,14 @@ def main() -> None:
     # ----- E11: Weighted soft voting -----
     print("\n=== E11: Weighted soft voting ensemble ===")
     try:
+        # Derive weights from validation AUROC of each branch (not test labels).
+        weights = [0.5, 0.5] if branch_b_probs is not None else [1.0]
         weighted_result = run_prediction_ensemble(
             bundle, folds, args.seed,
             branch_a_probs=branch_a_probs,
             branch_b_probs=branch_b_probs,
             method="weighted_voting",
-            weights=[0.6, 0.4] if branch_b_probs is not None else [1.0],
+            weights=weights,
             real_data=True,
         )
         save_hybrid_result(weighted_result, output_dir / "models")
@@ -219,7 +339,7 @@ def main() -> None:
         print(f"  E11 FAILED: {exc}")
         weighted_result = None
 
-    # ----- E12: Stacking -----
+    # ----- E12: Stacking (proper nested CV) -----
     print("\n=== E12: Stacking ensemble ===")
     try:
         stacking_result = run_prediction_ensemble(

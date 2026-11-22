@@ -19,11 +19,11 @@ All experiments use **real data only** (no synthetic data), **subject-wise 5-fol
 
 | Category | Experiment | Model | AUROC | Accuracy | Sensitivity | Specificity |
 |----------|-----------|-------|-------|----------|-------------|-------------|
-| **Overall best** | E6 | EEGNet (raw-signal CNN) | **0.770** | **0.694** | 0.738 | 0.650 |
+| **Overall best** | E6 | EEGNet (raw-signal CNN) | **0.772** | **0.719** | 0.738 | 0.700 |
 | Best classical | E2 | SVM-RBF (node+adj+rel) | **0.737** | 0.669 | 0.705 | 0.633 |
 | Best XGBoost | E1 | XGBoost (node+adj+rel) | 0.652 | 0.636 | 0.754 | 0.517 |
-| Best hybrid | E9 | Feature fusion (XGBoost) | 0.653 | **0.620** | **0.738** | 0.500 |
-| Best hybrid | E12 | Stacking (XGBoost + CTE-Net) | **0.650** | 0.603 | 0.689 | 0.517 |
+| Best hybrid | E9 | Feature fusion (XGBoost + CTENet) | 0.670 | **0.636** | **0.738** | 0.533 |
+| Best hybrid | E12 | Stacking (XGBoost + CTENet) | **0.673** | 0.603 | 0.672 | 0.533 |
 | Best deep (graph) | E8 | CTE-Net-inspired | 0.609 | 0.554 | 0.574 | 0.533 |
 
 **Key finding:** The raw-signal CNN (EEGNet, E6) outperforms all feature-engineered and hybrid approaches, achieving AUROC 0.770. Among classical approaches, SVM-RBF with full features (node+adj+rel) is best at AUROC 0.737. Hybrid fusion does not outperform the best single branch but provides more balanced sensitivity/specificity trade-offs.
@@ -115,21 +115,21 @@ All splits are subject-wise: no subject appears in both training and test folds,
 | Exp | Model | Description |
 |-----|-------|-------------|
 | E6 | EEGNet | Raw-signal CNN baseline (19 channels × 640 samples) |
-| E7 | CTE-Net Original | Attempted reconstruction with differentiable TE, Rényi entropy, Takens embeddings — **not trainable** with existing pipeline (architectural incompatibility: expects raw EEG `(B,C,T)`, pipeline provides band-power features `(C,F)`) |
+| E7 | CTE-Net Original | Attempted reconstruction with differentiable TE, Rényi entropy, Takens embeddings — **architecturally fixed** (raw EEG `(B,C,T)` input supported via `build_model(name="ctenet_original")`) but **not trained on CPU** due to O(C^2·T·embed) TE computation being prohibitively slow without GPU |
 | E8 | CTE-Net Inspired | Existing graph-attention model from `src/models.py` |
 
 ### Results
 
 | Exp | Model | AUROC | Accuracy | Sensitivity | Specificity |
 |-----|-------|-------|----------|-------------|-------------|
-| E6 | EEGNet | **0.770** | **0.694** | **0.738** | **0.650** |
-| E7 | CTE-Net Original | N/A (not trainable) | — | — | — |
+| E6 | EEGNet | **0.772** | **0.719** | **0.738** | **0.700** |
+| E7 | CTE-Net Original | Not trained on CPU | — | — | — |
 | E8 | CTE-Net Inspired | 0.609 | 0.554 | 0.574 | 0.533 |
 
 ### Key Findings (Paper 2)
 
-- **EEGNet (raw CNN)** dramatically outperforms the graph-attention CTE-Net inspired model (0.770 vs 0.609 AUROC)
-- The CTE-Net original reconstruction (Paper 2's core contribution) could not be trained due to pipeline architectural mismatch
+- **EEGNet (raw CNN)** dramatically outperforms the graph-attention CTE-Net inspired model (0.772 vs 0.609 AUROC)
+- The CTE-Net original reconstruction is architecturally complete and importable but too computationally expensive to train on CPU (O(C^2·T·embed) TE computation per batch)
 - Raw-signal deep learning exceeds hand-crafted feature approaches on this dataset
 
 ---
@@ -149,16 +149,17 @@ All splits are subject-wise: no subject appears in both training and test folds,
 
 | Exp | Method | Branch A | Branch B | AUROC | Accuracy | Sensitivity | Specificity |
 |-----|--------|----------|----------|-------|----------|-------------|-------------|
-| E9 | Feature fusion | XGBoost | none | **0.653** | **0.620** | **0.738** | 0.500 |
-| E10 | Soft voting | XGBoost | CTE-Net | 0.620 | 0.570 | 0.574 | 0.567 |
-| E11 | Weighted voting | XGBoost | CTE-Net | 0.627 | 0.595 | 0.672 | 0.517 |
-| E12 | Stacking | XGBoost | CTE-Net | **0.650** | 0.603 | 0.689 | 0.517 |
+| E9 | Feature fusion | XGBoost | CTENet | 0.670 | 0.636 | 0.738 | 0.533 |
+| E10 | Soft voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E11 | Weighted voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E12 | Stacking | XGBoost | CTENet | 0.673 | 0.603 | 0.672 | 0.533 |
 
 ### Key Findings (Hybrid)
 
-- Feature fusion (E9) achieves the best hybrid AUROC (0.653) and accuracy (0.620)
-- Stacking (E12) is close behind (AUROC 0.650) with better balance
-- Hybrid methods do **not** outperform the best single model (EEGNet at 0.770 AUROC or SVM-RBF at 0.737 AUROC)
+- All hybrid experiments (E9-E12) now execute successfully with proper per-fold deep model training
+- Feature fusion (E9) achieves AUROC 0.670, accuracy 0.636
+- Stacking (E12) achieves AUROC 0.673 — the best hybrid result
+- Hybrid methods do **not** outperform the best single model (EEGNet at 0.772 AUROC or SVM-RBF at 0.737 AUROC)
 - CTE-Net's weak performance (0.609 AUROC) limits the ensemble ceiling
 
 ---
@@ -169,16 +170,18 @@ All splits are subject-wise: no subject appears in both training and test folds,
 
 | Rank | Exp | Model | AUROC | Accuracy | Type |
 |------|-----|-------|-------|----------|------|
-| 1 | E6 | EEGNet | 0.770 | 0.694 | Deep (raw CNN) |
+| 1 | E6 | EEGNet | 0.772 | 0.719 | Deep (raw CNN) |
 | 2 | E2 | SVM-RBF (node+adj+rel) | 0.737 | 0.669 | Classical |
 | 3 | E4 | ExtraTrees (node+adj+rel) | 0.715 | 0.645 | Classical |
-| 4 | E3 | Random Forest (node+adj+rel) | 0.700 | 0.628 | Classical |
-| 5 | E2 | SVM-RBF (node+adj) | 0.728 | 0.678 | Classical |
-| 6 | E4 | ExtraTrees (node+adj) | 0.711 | 0.645 | Classical |
-| 7 | E9 | Feature fusion (XGBoost) | 0.653 | 0.620 | Hybrid |
-| 8 | E1 | XGBoost (node+adj+rel) | 0.652 | 0.636 | Classical |
-| 9 | E6-bonus | HistGB (node+adj+rel) | 0.654 | 0.645 | Classical |
-| 10 | E12 | Stacking (XGBoost + CTE-Net) | 0.650 | 0.603 | Hybrid |
+| 4 | E2 | SVM-RBF (node+adj) | 0.728 | 0.678 | Classical |
+| 5 | E4 | ExtraTrees (node+adj) | 0.711 | 0.645 | Classical |
+| 6 | E3 | Random Forest (node+adj+rel) | 0.700 | 0.628 | Classical |
+| 7 | E12 | Stacking (XGBoost + CTENet) | 0.673 | 0.603 | Hybrid |
+| 8 | E10 | Soft voting (XGBoost + CTENet) | 0.671 | 0.628 | Hybrid |
+| 9 | E11 | Weighted voting (XGBoost + CTENet) | 0.671 | 0.628 | Hybrid |
+| 10 | E9 | Feature fusion (XGBoost + CTENet) | 0.670 | 0.636 | Hybrid |
+| 11 | E6-bonus | HistGB (node+adj+rel) | 0.654 | 0.645 | Classical |
+| 12 | E1 | XGBoost (node+adj+rel) | 0.652 | 0.636 | Classical |
 
 ### Best Sensitivity / Specificity
 
@@ -231,19 +234,19 @@ All splits are subject-wise: no subject appears in both training and test folds,
 
 ## Limitations
 
-1. **CTE-Net original (E7) not trainable:** The faithful reconstruction from Paper 2 requires raw EEG input `(B, C, T)` but the existing pipeline provides band-power features `(C, F)`. The differentiable transfer entropy, Rényi entropy, rational quadratic kernel, and Takens embedding components were implemented in `src/ctenet.py` but could not be end-to-end trained.
+1. **CTE-Net original (E7) not trained on CPU:** The faithful reconstruction from Paper 2 is architecturally complete and importable via `build_model(name="ctenet_original")`, but the O(C^2·T·embed) differentiable transfer entropy computation is prohibitively slow on CPU for 5-fold CV with 60 epochs per fold. Full training requires GPU acceleration or reduced scope.
 
 2. **CPU-only training:** No CUDA available; deep models trained on CPU with 20-30 epochs. Performance may improve with more epochs and GPU acceleration.
 
 3. **Single dataset:** Results are specific to the IEEE DataPort 121-subject dataset. Generalization to other ADHD EEG datasets is untested.
 
-4. **Hybrid ceiling limited by CTE-Net:** The CTE-Net branch's weak performance (0.609 AUROC) limits the potential benefit of fusion/ensemble methods.
+4. **Hybrid ceiling limited by CTE-Net:** The CTE-Net branch's weak performance (0.609 AUROC) limits the potential benefit of fusion/ensemble methods. All hybrid results (0.670–0.673 AUROC) are below the best single-model results (EEGNet 0.772, SVM-RBF 0.737).
 
 ---
 
 ## Recommendations
 
-1. **For production deployment:** Use EEGNet (E6) — best overall AUROC 0.770 — if raw EEG inference is acceptable.
+1. **For production deployment:** Use EEGNet (E6) — best overall AUROC 0.772 — if raw EEG inference is acceptable.
 2. **For interpretable clinical use:** Use SVM-RBF with node+adj+rel features (E2) — AUROC 0.737 with clinically meaningful spectral/connectivity features.
 3. **For maximum sensitivity:** Use XGBoost with node+adj+rel features (E1) — sensitivity 0.754.
 4. **Future work:** Fix CTE-Net original to accept raw EEG input and train end-to-end; explore larger feature sets; test on external validation datasets.

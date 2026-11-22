@@ -1,4 +1,4 @@
-"""EEG models: a raw-signal CNN baseline and a CTE-Net-style graph transformer."""
+"""EEG models: a raw-signal CNN baseline, CTE-Net-inspired, and CTE-Net original."""
 
 from __future__ import annotations
 
@@ -196,6 +196,29 @@ class CTENet(nn.Module):
         pooled = (hidden * weights.unsqueeze(-1)).sum(dim=1)
         return self.head(pooled).squeeze(-1)
 
+    def forward_features(
+        self, x: torch.Tensor, adjacency: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return deep feature representation before the classification head.
+
+        Returns
+        -------
+        pooled : (B, d_model)
+            Attention-pooled node representations.
+        hidden : (B, C, d_model)
+            Per-node hidden states after graph attention layers.
+        weights : (B, C)
+            Attention weights used for pooling.
+        """
+        hidden = self.node_projection(x)
+        for layer in self.layers:
+            hidden = layer(hidden, adjacency)
+
+        scores = self.pool_score(hidden).squeeze(-1)  # (B, C)
+        weights = torch.softmax(scores, dim=1)
+        pooled = (hidden * weights.unsqueeze(-1)).sum(dim=1)  # (B, d_model)
+        return pooled, hidden, weights
+
 
 def build_model(
     config: ModelConfig,
@@ -225,6 +248,21 @@ def build_model(
             n_heads=config.n_heads,
             n_layers=config.n_layers,
             dropout=config.dropout,
+        )
+
+    if name in {"ctenet_original", "ctenet_original_model"}:
+        from .ctenet import CTENetOriginal as _CTENetOriginal
+        return _CTENetOriginal(
+            n_channels=n_channels,
+            n_times=n_times,
+            d_model=config.d_model,
+            n_heads=config.n_heads,
+            n_layers=config.n_layers,
+            dropout=config.dropout,
+            embed_dim=3,
+            embed_delay=1,
+            use_te=True,
+            use_rq_kernel=True,
         )
 
     raise ValueError(f"Unknown model: {config.name}")
