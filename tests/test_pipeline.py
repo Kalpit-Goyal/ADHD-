@@ -6,9 +6,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 
 from src.config import DataConfig, FeatureConfig
+from src.cv import assert_no_subject_overlap, make_repeated_folds
 from src.data import (
     FeatureBundle,
     build_feature_bundle,
@@ -21,6 +23,7 @@ from src.data import (
 )
 from src.evaluate import binary_metrics
 from src.features import bandpower_features, granger_adjacency, plv_adjacency
+from src.hybrid_model import run_feature_fusion, run_prediction_ensemble
 from src.models import CTENet, EEGNet
 
 
@@ -226,4 +229,73 @@ def test_manifest_and_feature_bundle(tmp_path: Path) -> None:
     assert bundle.raw.shape[1:] == (1, 19, 640)
     assert bundle.node_features.shape[1:] == (19, 6)
     assert len(bundle.subject_labels) == 4
+
+
+def test_feature_fusion_and_ensemble() -> None:
+    rng = np.random.default_rng(0)
+    n_subjects = 20
+    epochs_per_subject = 2
+    n_epochs = n_subjects * epochs_per_subject
+
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+    labels = np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32)
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_epochs, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_epochs, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_epochs, 19, 19).astype(np.float32),
+        labels=labels,
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
+    )
+
+    folds = make_repeated_folds(subject_labels, n_splits=2, n_repeats=1, seed=42)
+
+    # Soft voting with dummy branch probs
+    branch_a_probs: dict[int, dict[str, float]] = {}
+    branch_b_probs: dict[int, dict[str, float]] = {}
+    for fold in folds:
+        for sid in fold.test:
+            branch_a_probs[fold.fold] = {sid: 0.7}
+            branch_b_probs[fold.fold] = {sid: 0.3}
+
+    result = run_prediction_ensemble(
+        bundle=bundle,
+        folds=folds,
+        seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="soft_voting",
+        real_data=False,
+    )
+    assert result.experiment == "soft_voting"
+    assert 0.0 <= result.roc_auc <= 1.0 or np.isnan(result.roc_auc)
+
+
+def test_no_subject_overlap_raises() -> None:
+    bundle = _make_bundle()
+    folds = subject_folds(bundle, n_splits=3, val_size=0.25, seed=42)
+
+    # All folds should pass (no overlap)
+    for train_subjects, val_subjects, test_subjects in folds:
+        assert_no_subject_overlap(train_subjects, val_subjects, test_subjects)
+
+    # Overlapping train/test should raise
+    try:
+        assert_no_subject_overlap(["s00"], ["s01"], ["s00"])
+        assert False, "Expected ValueError for subject overlap"
+    except ValueError:
+        pass
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v"]))
 

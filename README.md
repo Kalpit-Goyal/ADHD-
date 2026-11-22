@@ -11,7 +11,43 @@ This folder contains a literature review, a structured paper database, and a wor
 | [`research/accuracy_inflation_eeg.png`](research/accuracy_inflation_eeg.png) | Bar chart: same EEG dataset, 65.6%–100% depending on the split |
 | [`research/make_accuracy_chart.py`](research/make_accuracy_chart.py) | Script that regenerates the chart |
 | [`RESULTS.md`](RESULTS.md) | All of our experiment results: headline numbers, per-fold tables, baselines, feature search, ensembles, caveats |
+| [`FINAL_RESEARCH_REPORT.md`](FINAL_RESEARCH_REPORT.md) | Complete research report: Paper 1 + Paper 2 hybrid system, all E1–E12 experiments, figures, limitations |
+| [`RESEARCH_IMPLEMENTATION_AUDIT.md`](RESEARCH_IMPLEMENTATION_AUDIT.md) | Audit of existing implementation vs both papers, gap analysis, recommendations |
 | [`sensors-26-05786-v2.pdf`](sensors-26-05786-v2.pdf) | The CTE-Net reference paper (Gomez-Rivera et al., *Sensors* 2026) |
+
+## Research experiments — Paper 1 + Paper 2 hybrid system (E1–E12)
+
+All experiments use **real data only** (121 subjects, 2,918 epochs, subject-wise 5-fold CV) and run on **CPU**.
+
+| Exp | Experiment | Model | AUROC | Accuracy | Best result |
+|-----|------------|-------|-------|----------|-------------|
+| E1–E5 | Paper 1 classical | XGBoost / SVM-RBF / RF / ExtraTrees / LR | 0.737 | 0.678 | SVM-RBF node+adj+rel |
+| E6 | Paper 2 deep | EEGNet (raw CNN) | **0.770** | **0.694** | **Best overall** |
+| E7 | Paper 2 original | CTE-Net (faithful reconstruction) | — | — | Not trainable (arch mismatch) |
+| E8 | Paper 2 deep | CTE-Net inspired (graph-attention) | 0.609 | 0.554 | — |
+| E9–E12 | Hybrid | Feature fusion / voting / stacking | 0.653 | 0.620 | Feature fusion |
+
+**Best overall:** EEGNet (E6) at AUROC 0.770, accuracy 0.694.  
+**Best classical:** SVM-RBF with full features (E2) at AUROC 0.737.  
+**Best hybrid:** Feature fusion (E9) at AUROC 0.653.
+
+See `FINAL_RESEARCH_REPORT.md` for full details and `RESULTS.md` for per-fold tables.
+
+### Run all experiments
+
+```bash
+# Classical models (E1-E5)
+python scripts/train_classical.py --config configs/eeg_cte_real.yaml --output results/classical_paper1 --folds 5 --seed 42
+
+# Deep models (E6-E8)
+python scripts/train_ctenet.py --config configs/eeg_cte_real.yaml --output results/deep_models --folds 5 --seed 42 --epochs 30
+
+# Hybrid fusion & ensembles (E9-E12)
+python scripts/train_hybrid.py --config configs/eeg_cte_real.yaml --output results/hybrid --folds 5 --seed 42 --deep-epochs 20
+
+# Generate all figures
+python scripts/visualize_results.py
+```
 
 ## Web app — NeuroScan AI (ADHD EEG screening)
 

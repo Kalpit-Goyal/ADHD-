@@ -203,10 +203,19 @@ python -m pip install -r requirements.txt
 # One-time data prep (after extracting the four archives to data/real/raw/)
 python scripts/prepare_ieee_dataset.py
 
-# Deep model
-python scripts/run_cv.py --config configs/eeg_cte_real.yaml
+# Paper 1: Classical models (E1-E5 + HistGB bonus)
+python scripts/train_classical.py --config configs/eeg_cte_real.yaml --output results/classical_paper1 --folds 5 --seed 42
 
-# Classical baselines, feature search, repeated CV, ensembles
+# Paper 2: Deep models (E6-E8)
+python scripts/train_ctenet.py --config configs/eeg_cte_real.yaml --output results/deep_models --folds 5 --seed 42 --epochs 30
+
+# Hybrid fusion & ensembles (E9-E12)
+python scripts/train_hybrid.py --config configs/eeg_cte_real.yaml --output results/hybrid --folds 5 --seed 42 --deep-epochs 20
+
+# Visualizations
+python scripts/visualize_results.py
+
+# Classical baselines, feature search, repeated CV, ensembles (legacy pipeline)
 python scripts/classical_baseline.py --config configs/eeg_cte_real.yaml
 python scripts/feature_search.py --config configs/eeg_cte_real.yaml
 python scripts/final_validation.py --config configs/eeg_cte_real.yaml --repeats 3
@@ -216,4 +225,64 @@ python scripts/ensemble_validation.py
 python scripts/train_deploy_model.py
 ```
 
-Raw outputs — `metrics.json`, out-of-fold predictions, fold metrics, training history, ROC/PR, calibration, confusion matrices — are written to `results/` (git-ignored). The deployable artifact and its metrics live in `models/`.
+Raw outputs — metrics.json, out-of-fold predictions, fold metrics, training history, ROC/PR, calibration, confusion matrices — are written to `results/` (git-ignored). The deployable artifact and its metrics live in `models/`.
+
+---
+
+## 11. Paper 1: Classical statistical/spectral features (E1–E5)
+
+Subject-wise 5-fold CV on 121 subjects (2,918 epochs). Feature sets: `node` = per-channel band power, `adj` = directed-connectivity edges, `rel` = relative band power. All runs on real data.
+
+| Exp | Model | Feature Set | AUROC | Accuracy | Sensitivity | Specificity |
+|-----|-------|-------------|-------|----------|-------------|-------------|
+| E1 | XGBoost | node | 0.609 | 0.537 | 0.525 | 0.550 |
+| E1 | XGBoost | node+adj | 0.637 | 0.579 | 0.541 | 0.617 |
+| E1 | XGBoost | node+adj+rel | **0.652** | **0.636** | **0.754** | **0.517** |
+| E2 | SVM-RBF | node | 0.664 | 0.628 | 0.689 | 0.567 |
+| E2 | SVM-RBF | node+adj | 0.728 | 0.678 | 0.787 | 0.567 |
+| E2 | SVM-RBF | node+adj+rel | **0.737** | 0.669 | **0.705** | **0.633** |
+| E3 | Random Forest | node | 0.673 | 0.595 | 0.639 | 0.550 |
+| E3 | Random Forest | node+adj | 0.692 | 0.628 | 0.754 | 0.500 |
+| E3 | Random Forest | node+adj+rel | 0.700 | 0.628 | 0.754 | 0.500 |
+| E4 | ExtraTrees | node | 0.679 | 0.620 | 0.754 | 0.483 |
+| E4 | ExtraTrees | node+adj | 0.711 | 0.645 | 0.721 | 0.567 |
+| E4 | ExtraTrees | node+adj+rel | 0.715 | 0.645 | 0.689 | 0.600 |
+| E5 | Logistic Regression | node | 0.567 | 0.603 | 0.623 | 0.583 |
+| E5 | Logistic Regression | node+adj | 0.617 | 0.628 | 0.705 | 0.550 |
+| E5 | Logistic Regression | node+adj+rel | 0.619 | 0.620 | 0.623 | 0.617 |
+
+**Best classical:** SVM-RBF with node+adj+rel (AUROC 0.737, accuracy 0.669).
+
+---
+
+## 12. Paper 2: Deep models (E6–E8)
+
+| Exp | Model | AUROC | Accuracy | Sensitivity | Specificity | Notes |
+|-----|-------|-------|----------|-------------|-------------|-------|
+| E6 | EEGNet (raw CNN) | **0.770** | **0.694** | **0.738** | **0.650** | Raw-signal CNN, best overall |
+| E7 | CTE-Net Original | — | — | — | — | Not trainable — architectural mismatch |
+| E8 | CTE-Net Inspired | 0.609 | 0.554 | 0.574 | 0.533 | Graph-attention model from src/models.py |
+
+**Best deep:** EEGNet (AUROC 0.770) — outperforms all classical and hybrid approaches.
+
+The CTE-Net original (Paper 2's faithful reconstruction with differentiable TE, Rényi entropy, rational quadratic kernel, Takens embeddings) was implemented in `src/ctenet.py` but could not be trained because the existing pipeline provides band-power features `(C, F)` while CTENetOriginal expects raw EEG `(B, C, T)`.
+
+---
+
+## 13. Hybrid fusion and ensembles (E9–E12)
+
+| Exp | Method | Branch A | Branch B | AUROC | Accuracy | Sensitivity | Specificity |
+|-----|--------|----------|----------|-------|----------|-------------|-------------|
+| E9 | Feature fusion | XGBoost | none | **0.653** | **0.620** | **0.738** | 0.500 |
+| E10 | Soft voting | XGBoost | CTE-Net | 0.620 | 0.570 | 0.574 | 0.567 |
+| E11 | Weighted voting | XGBoost | CTE-Net | 0.627 | 0.595 | 0.672 | 0.517 |
+| E12 | Stacking | XGBoost | CTE-Net | 0.650 | 0.603 | 0.689 | 0.517 |
+
+Feature fusion (E9) achieves the best hybrid AUROC (0.653) and accuracy (0.620). Stacking (E12) is close behind with better balance. Hybrid methods do not outperform the best single model (EEGNet at 0.770 AUROC).
+
+---
+
+## 14. Full results report
+
+See `FINAL_RESEARCH_REPORT.md` for the complete research report with all figures, methodology details, limitations, and recommendations.
+
