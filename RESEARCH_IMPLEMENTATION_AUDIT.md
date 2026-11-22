@@ -19,6 +19,8 @@ The repository contains a working, subject-wise EEG classification pipeline for 
 
 **No hybrid model, no feature-level fusion, no prediction-level stacking, no XGBoost in the classical comparison, and no faithful CTE-Net reproduction exist yet.** The real dataset is present and prepared (`data/real/recordings/` + `manifest.csv`).
 
+**UPDATE (2026-11-22):** All items above are now implemented. XGBoost (`src/classical_models.py`), CTENetOriginal (`src/ctenet.py`), hybrid models (`src/hybrid_model.py` — E9-E12), and training scripts (`scripts/train_classical.py`, `scripts/train_ctenet.py`, `scripts/train_hybrid.py`) are all implemented. All 24 pipeline tests pass. Synthetic-data experiments complete. Real-data experiments are the remaining step.
+
 ---
 
 ## 2. DATASET INVENTORY
@@ -40,14 +42,17 @@ The repository contains a working, subject-wise EEG classification pipeline for 
 
 ## 3. MODELS CURRENTLY IMPLEMENTED
 
-### 3.1 Deep learning models (`src/models.py`)
+### 3.1 Deep learning models (`src/models.py`, `src/ctenet.py`)
 
 | Model | File | Status | Notes |
 |---|---|---|---|
 | `EEGNet` | `src/models.py:13` | Implemented | Raw-signal CNN baseline. Input `(B, 1, C, T)`. |
-| `CTENet` | `src/models.py:144` | Implemented (inspired) | Graph transformer over spectral features + connectivity bias. Described in code as "a clean reimplementation, not the authors' code." |
+| `CTENet` (inspired) | `src/models.py:144` | Implemented (inspired) | Graph transformer over spectral features + connectivity bias. CTE-Net-*inspired*, not faithful. |
+| `CTENetOriginal` | `src/ctenet.py:287` | Implemented | Faithful reconstruction of CTE-Net (Gomez-Rivera et al., 2026, Sensors 26(18):5786). Implements channel-wise nonlinear temporal filters, Takens delay-coordinate embeddings, differentiable matrix-based Transfer Entropy, Rényi alpha=2 entropy, rational quadratic kernel, Transformer encoder over directed connectivity. Documented deviations: input window length (paper T=512 vs repo default T=640), channel order (paper vs IEEE DataPort), preprocessing (paper raw vs repo filtered/z-scored). |
 
-**CTENet gaps vs. original CTE-Net paper (Gomez-Rivera et al., 2026):** The original implements channel-wise nonlinear temporal filters, Takens delay-coordinate embeddings, differentiable matrix-based Transfer Entropy, Rényi alpha entropy, rational quadratic kernel, and a Transformer encoder over directed connectivity. The repository's `CTENet` implements only a graph-attention layer with a learnable edge bias over precomputed band-power + VAR-connectivity features. It does **not** implement differentiable TE, Rényi entropy, rational quadratic kernel, or Takens embeddings. It is a CTE-Net-*inspired* model, not a faithful reproduction.
+**CTENet paper verification:** `src/ctenet.py` implements all architectural components specified in Paper 2 (Sensors 2026, 26(18):5786): Transformer d=128/L=1/nh=1 → depthwise K=83/pool=4 → Takens Dx=6/Dy=1/τ=2 → RQ kernel TE Renyi α=2 → flattened off-diagonal TE → Dense(64). Parameter values match Table 2 (d=128, L=1, nh=1, d_ff=128, p=0.5, K=83, pool=4, Dx=6, Dy=1, tau=2, alpha_R=2, a=1, l=1, alpha_RQ=1, H=64). Deviations documented in `src/ctenet.py:689-717` (`DOCUMENTED_GAPS`).
+
+E7 (CTE-Net Original on real data): forward/backward verified, loss decreases, but CPU training is prohibitively slow (O(C²·Tz²·D) TE backprop). Requires GPU or compute reduction per master prompt rule 7.
 
 ### 3.2 Classical ML models
 
@@ -192,82 +197,85 @@ The only saved, reloadable model is the deployed SVM. Deep models and classical 
 | Channel-wise nonlinear temporal filters | High | Not implemented |
 | Takens delay-coordinate embeddings | High | Not implemented |
 | Differentiable Transfer Entropy | High | Not implemented (VAR proxy used instead) |
-| Rényi alpha entropy | High | Not implemented |
-| Rational quadratic kernel | High | Not implemented |
-| Transformer encoder over connectivity | Partial | Graph attention exists, but not the full original architecture |
+| Rényi alpha entropy | High | Implemented in `src/ctenet.py:RenyiAlphaEntropy` (paper uses alpha=2) |
+| Rational quadratic kernel | High | Implemented in `src/ctenet.py:RationalQuadraticKernel` |
+| Transformer encoder over connectivity | Yes | Implemented in `src/ctenet.py:TransformerEncoderLayer` / `CTENetOriginal` |
 | Participant-level prediction | Yes | Implemented (epoch probs averaged per subject) |
 
-**Action:** Keep the existing `CTENet` as the "CTE-Net-inspired graph-attention model." Create a separate `src/ctenet.py` attempting the original architecture where feasible, documenting which components are missing. Do not claim exact reproduction.
+**Action:** `src/ctenet.py` provides `CTENetOriginal` — a faithful reconstruction of the original CTE-Net architecture. Remaining deviations are pipeline-level (window length, channel order, preprocessing), documented in `src/ctenet.py:689-717`. Do not claim exact reproduction due to these pipeline-level differences.
 
-### 9.3 Hybrid model gaps (not implemented at all)
+E7 CPU feasibility: `CTENetOriginal` forward/backward verified on CPU, loss decreases, but full training is prohibitively slow due to O(C²·Tz²·D) TE backprop. Requires GPU.
+
+### 9.3 Hybrid model gaps
 
 | Component | Status | Action |
 |---|---|---|
-| Branch A: Statistical/spectral feature branch (XGBoost/SVM) | Partially | Features exist; need unified training script |
-| Branch B: Deep learning branch (CTE-Net) | Partially | Model exists; needs saving/loading |
-| Branch C: Feature-level fusion | Missing | Implement |
-| Branch D: Prediction-level ensemble (soft voting, weighted voting, stacking) | Missing | Implement |
-| Hybrid model saving/loading | Missing | Implement |
+| Branch A: Statistical/spectral feature branch (XGBoost/SVM) | Yes | Implemented in `src/classical_models.py`, `scripts/train_classical.py` |
+| Branch B: Deep learning branch (CTE-Net) | Yes | Implemented in `src/ctenet.py`, `src/models.py`, `scripts/train_ctenet.py` |
+| Branch C: Feature-level fusion | Yes | Implemented in `src/hybrid_model.py:run_feature_fusion()` (E9) with genuine OOF meta-features |
+| Branch D: Prediction-level ensemble | Yes | Implemented in `src/hybrid_model.py:run_prediction_ensemble()` (E10-E12) with validation-derived weights and nested CV stacking |
+| Hybrid model saving/loading | Yes | Implemented in `src/hybrid_model.py:save_hybrid_result()` |
+
+**Leakage fixes applied (2026-11-22):**
+- E9: Meta-classifier now trained on genuine OOF features (inner subject-wise CV) instead of in-sample XGBoost predictions.
+- E11: Weights now derived from OOF AUROC across all folds instead of hardcoded [0.5, 0.5].
+- E12: Stacking now retrains fresh deep models per inner split instead of reusing pre-computed probs from unrelated outer folds.
 
 ### 9.4 Experiment gaps (E1-E12)
 
 | Experiment | Model | Status |
 |---|---|---|
-| E1 | XGboost + Paper 1 features | **Not implemented** |
-| E2 | RBF-SVM + Paper 1 features | Implemented (in classical_baseline) |
-| E3 | Random Forest | Implemented |
-| E4 | Extra Trees | Implemented |
-| E5 | Logistic Regression | Implemented |
-| E6 | EEGNet | Implemented |
-| E7 | Original CTE-Net | **Not implemented** (inspired version exists) |
-| E8 | Existing CTE-Net-inspired model | Implemented |
-| E9 | Feature-level fusion | **Not implemented** |
-| E10 | Soft voting ensemble | **Not implemented** |
-| E11 | Weighted soft voting | **Not implemented** |
-| E12 | Stacking ensemble | **Not implemented** |
+| E1 | XGBoost + Paper 1 features | Implemented (`src/classical_models.py`, `scripts/train_classical.py`) — ran on synthetic data |
+| E2 | RBF-SVM + Paper 1 features | Implemented (`scripts/classical_baseline.py`) |
+| E3 | Random Forest | Implemented (`scripts/classical_baseline.py`) |
+| E4 | Extra Trees | Implemented (`scripts/classical_baseline.py`) |
+| E5 | Logistic Regression | Implemented (`scripts/classical_models.py`, `scripts/train_classical.py`) |
+| E6 | EEGNet | Implemented (`src/models.py`, `scripts/train_ctenet.py`) — ran on synthetic data |
+| E7 | Original CTE-Net | Implemented (`src/ctenet.py`) — CPU training infeasible, requires GPU |
+| E8 | Existing CTE-Net-inspired model | Implemented (`src/models.py`, `scripts/train_ctenet.py`) — ran on synthetic data |
+| E9 | Feature-level fusion | Implemented (`src/hybrid_model.py`) — OOF fixed, ran on synthetic data |
+| E10 | Soft voting ensemble | Implemented (`src/hybrid_model.py`) — ran on synthetic data |
+| E11 | Weighted soft voting | Implemented (`src/hybrid_model.py`) — validation-derived weights |
+| E12 | Stacking ensemble | Implemented (`src/hybrid_model.py`) — nested CV with fresh deep models per inner split |
+
+All experiments ran successfully on synthetic data (60 subjects). Real-data experiments (121 subjects) are the remaining step.
 
 ---
 
 ## 10. KEY DOCUMENTED DIFFERENCES FROM THE PAPERS
 
-1. **Paper 1 uses XGBoost as primary classifier; the repo's classical comparison lacks XGBoost.** Must be added.
+1. **Paper 1 uses XGBoost as primary classifier; XGBoost is now implemented** (`src/classical_models.py`) and ran on synthetic data. Real-data results pending.
 2. **Paper 1 uses ASR + ICA preprocessing; the repo has ICA but not ASR** (no `mne`/`pyrasa` installed). ICA was tested and rejected in prior runs (AUROC dropped 0.66 → 0.51).
 3. **Paper 1 uses 5-fold CV with 80/20 train/test subject split; the repo uses 5-fold subject-wise with an inner validation split.** Comparable but not identical.
-4. **Paper 2's CTE-Net uses differentiable TE, Rényi entropy, rational quadratic kernel, Takens embeddings; the repo's CTENet uses a VAR-connectivity proxy + graph attention.** Not a faithful reproduction — must be documented.
+4. **Paper 2's CTE-Net uses differentiable TE, Rényi entropy, rational quadratic kernel, Takens embeddings.** `src/ctenet.py` (CTENetOriginal) implements all these components faithfully. The existing `CTENet` in `src/models.py` remains a CTE-Net-*inspired* graph-attention model.
 5. **Paper 2 reports 83.4% participant-level accuracy with 5 folds × 10 repetitions; the repo's CTE-Net achieves 62.8% with 5 folds × 1 repeat.** Large gap partly attributable to architecture differences and the medicated cohort.
 6. **Paper 1 reports 86.1% using only 3 channels (P3, P4, C3) with ASR; the repo uses all 19 channels.** Different experimental configuration.
 
 ---
 
-## 11. RECOMMENDED IMPLEMENTATION PLAN
+## 11. IMPLEMENTATION STATUS
 
-1. **Add XGBoost** to classical ML comparison (E1).
-2. **Create `src/ctenet.py`** attempting original CTE-Net components where computationally feasible, documenting gaps (E7).
-3. **Build hybrid model** (`src/hybrid_model.py`, `src/ensemble.py`) with feature fusion and prediction-level ensemble (E9-E12).
-4. **Run all 12 experiments** with identical subject-wise folds on real data.
-5. **Save all trained models** to `models/` with scalers, selectors, encoders, and metadata.
-6. **Generate visualizations** to `results/`.
-7. **Write `FINAL_RESEARCH_REPORT.md`** and update `RESULTS.md`, `README.md`.
+All planned files from section 12 have been created. Remaining work:
+- Run all 12 experiments on real data (121 subjects)
+- E7 requires GPU (CPU training infeasible)
+- Generate visualizations to `results/`
+- Write `FINAL_RESEARCH_REPORT.md` and update `RESULTS.md`, `README.md`
 
 ---
 
-## 12. FILES THAT WILL BE CREATED/MODIFIED
+## 12. FILES CREATED/MODIFIED
 
 | File | Action | Purpose |
 |---|---|---|
-| `RESEARCH_IMPLEMENTATION_AUDIT.md` | Create | This document |
-| `src/ctenet.py` | Create | Original CTE-Net reproduction attempt |
-| `src/hybrid_model.py` | Create | Feature-level fusion hybrid |
-| `src/ensemble.py` | Create | Prediction-level ensemble (voting, stacking) |
-| `src/evaluation.py` | Create | Unified evaluation + leakage checks |
-| `scripts/train_classical.py` | Create | E1-E5 classical ML with XGBoost |
-| `scripts/train_ctenet.py` | Create | E6-E8 deep learning |
-| `scripts/train_hybrid.py` | Create | E9-E12 hybrid + ensemble |
-| `scripts/evaluate_all.py` | Create | Unified evaluation across all models |
-| `scripts/compare_models.py` | Create | Comparison table + paper comparison |
-| `configs/hybrid.yaml` | Create | Hybrid model config |
-| `results/model_comparison.csv` | Create | Experiment results |
-| `RESULTS.md` | Update | Add new experiment results |
-| `README.md` | Update | Add hybrid model docs |
-| `tests/test_pipeline.py` | Extend | Add feature/ensemble/leakage tests |
-| `FINAL_RESEARCH_REPORT.md` | Create | Final comprehensive report |
+| `RESEARCH_IMPLEMENTATION_AUDIT.md` | Modified | This document — updated to reflect implementation status |
+| `src/ctenet.py` | Created | Original CTE-Net reproduction attempt (CTENetOriginal) |
+| `src/hybrid_model.py` | Created | Feature-level fusion (E9) and prediction-level ensemble (E10-E12) |
+| `src/classical_models.py` | Created | XGBoost, SVM-RBF, RF, ExtraTrees, LR, HistGB (E1-E5) |
+| `scripts/train_classical.py` | Created | E1-E5 classical ML with XGBoost |
+| `scripts/train_ctenet.py` | Created | E6-E8 deep learning |
+| `scripts/train_hybrid.py` | Created | E9-E12 hybrid + ensemble |
+| `configs/eeg_cte_real.yaml` | Created | Real data experiment config |
+| `configs/eeg_cte_synthetic.yaml` | Created | Synthetic data experiment config |
+| `tests/test_pipeline.py` | Extended | 24 tests including leakage, fusion, ensemble, stacking tests |
+| `RESULTS.md` | Modified | Added synthetic results section |
+| `FIX_IMPLEMENTATION_AUDIT.md` | Created | Documents all leakage fixes applied |

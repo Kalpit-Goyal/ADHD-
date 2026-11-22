@@ -312,12 +312,19 @@ CTENet Original (Paper 2's faithful reconstruction with differentiable TE, Rény
 
 | Exp | Method | Branch A | Branch B | AUROC | Accuracy | Sensitivity | Specificity |
 |-----|--------|----------|----------|-------|----------|-------------|-------------|
-| E9 | Feature fusion | XGBoost | CTENet | 0.670 | 0.636 | 0.738 | 0.533 |
-| E10 | Soft voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
-| E11 | Weighted voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E9 | Feature Fusion | XGBoost | CTENet | 0.670 | 0.636 | 0.738 | 0.533 |
+| E10 | Soft Voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E11 | Weighted Voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
 | E12 | Stacking | XGBoost | CTENet | 0.673 | 0.603 | 0.672 | 0.533 |
 
 All hybrid experiments use subject-wise 5-fold CV with identical folds. Deep model is trained per fold on training subjects only, with validation for early stopping. Meta-classifiers use nested CV — never trained/evaluated on same rows.
+
+**Leakage fixes applied (2026-11-22):**
+- E9: Meta-classifier now trained on genuine OOF features (inner subject-wise CV) instead of in-sample XGBoost predictions trained on train+val.
+- E11: Weights now derived from OOF AUROC across all folds instead of hardcoded [0.5, 0.5].
+- E12: Stacking now retrains fresh deep models per inner split instead of reusing pre-computed probs from unrelated outer folds.
+
+**Real-data recomputation note:** E9 and E12 require retraining deep models per inner CV split, which is prohibitively slow on CPU (O(C²·Tz²·D) TE backprop × multiple models per fold). The E9-E12 results above were computed before the leakage fixes. Recomputing with the fixed code requires GPU acceleration (paper used NVIDIA Quadro RTX 5000). The synthetic-data validation run confirms the fixed pipeline executes correctly with all tests passing (24/24).
 
 Hybrid methods do not outperform the best single model (EEGNet at 0.772 AUROC).
 

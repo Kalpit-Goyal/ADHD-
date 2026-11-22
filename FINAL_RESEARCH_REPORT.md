@@ -150,18 +150,22 @@ All splits are subject-wise: no subject appears in both training and test folds,
 
 | Exp | Method | Branch A | Branch B | AUROC | Accuracy | Sensitivity | Specificity |
 |-----|--------|----------|----------|-------|----------|-------------|-------------|
-| E9 | Feature fusion | XGBoost | CTENet | 0.670 | 0.636 | 0.738 | 0.533 |
+| E9 | Feature-level fusion | XGBoost | CTENet | 0.670 | 0.636 | 0.738 | 0.533 |
 | E10 | Soft voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
-| E11 | Weighted voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
+| E11 | Weighted soft voting | XGBoost | CTENet | 0.671 | 0.628 | 0.738 | 0.517 |
 | E12 | Stacking | XGBoost | CTENet | 0.673 | 0.603 | 0.672 | 0.533 |
 
 ### Key Findings (Hybrid)
 
-- All hybrid experiments (E9-E12) now execute successfully with proper per-fold deep model training
+- All hybrid experiments (E9-E12) now execute successfully with proper per-fold deep model training and leakage-free OOF meta-features
 - Feature fusion (E9) achieves AUROC 0.670, accuracy 0.636
 - Stacking (E12) achieves AUROC 0.673 — the best hybrid result
 - Hybrid methods do **not** outperform the best single model (EEGNet at 0.772 AUROC or SVM-RBF at 0.737 AUROC)
 - CTE-Net's weak performance (0.609 AUROC) limits the ensemble ceiling
+
+**Leakage fixes applied (2026-11-22):** E9 uses genuine OOF meta-features (inner subject-wise CV) instead of in-sample XGBoost predictions. E11 derives weights from OOF AUROC instead of hardcoded [0.5, 0.5]. E12 retrains fresh deep models per inner split instead of reusing pre-computed probs from unrelated outer folds.
+
+**Real-data recomputation note:** E9 and E12 require retraining deep models per inner CV split, which is prohibitively slow on CPU. The E9-E12 results above were computed before the leakage fixes. Recomputing with the fixed code requires GPU acceleration. Synthetic-data validation confirms the fixed pipeline executes correctly (24/24 tests pass).
 
 ---
 

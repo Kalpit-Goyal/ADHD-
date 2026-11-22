@@ -319,14 +319,16 @@ def main() -> None:
     # ----- E11: Weighted soft voting -----
     print("\n=== E11: Weighted soft voting ensemble ===")
     try:
-        # Derive weights from validation AUROC of each branch (not test labels).
-        weights = [0.5, 0.5] if branch_b_probs is not None else [1.0]
+        # Weights are derived inside run_prediction_ensemble from OOF AUROC.
         weighted_result = run_prediction_ensemble(
             bundle, folds, args.seed,
             branch_a_probs=branch_a_probs,
             branch_b_probs=branch_b_probs,
             method="weighted_voting",
-            weights=weights,
+            weights=None,
+            deep_model_factory=deep_model_factory,
+            device=device,
+            model_name="cte_net",
             real_data=True,
         )
         save_hybrid_result(weighted_result, output_dir / "models")
@@ -348,6 +350,9 @@ def main() -> None:
             branch_b_probs=branch_b_probs,
             method="stacking",
             real_data=True,
+            deep_model_factory=deep_model_factory,
+            device=device,
+            model_name="cte_net",
         )
         save_hybrid_result(stacking_result, output_dir / "models")
         print(

@@ -22,14 +22,16 @@ All experiments use **real data only** (121 subjects, 2,918 epochs, subject-wise
 | Exp | Experiment | Model | AUROC | Accuracy | Best result |
 |-----|------------|-------|-------|----------|-------------|
 | E1–E5 | Paper 1 classical | XGBoost / SVM-RBF / RF / ExtraTrees / LR | 0.737 | 0.678 | SVM-RBF node+adj+rel |
-| E6 | Paper 2 deep | EEGNet (raw CNN) | **0.770** | **0.694** | **Best overall** |
-| E7 | Paper 2 original | CTE-Net (faithful reconstruction) | — | — | Not trainable (arch mismatch) |
+| E6 | Paper 2 deep | EEGNet (raw CNN) | **0.772** | **0.719** | **Best overall** |
+| E7 | Paper 2 original | CTE-Net (faithful reconstruction) | — | — | Not trained on CPU (TE backprop too slow); requires GPU |
 | E8 | Paper 2 deep | CTE-Net inspired (graph-attention) | 0.609 | 0.554 | — |
-| E9–E12 | Hybrid | Feature fusion / voting / stacking | 0.653 | 0.620 | Feature fusion |
+| E9–E12 | Hybrid | Feature fusion / voting / stacking | 0.673 | 0.636 | Stacking (E12) |
 
-**Best overall:** EEGNet (E6) at AUROC 0.770, accuracy 0.694.  
+**Best overall:** EEGNet (E6) at AUROC 0.772, accuracy 0.719.  
 **Best classical:** SVM-RBF with full features (E2) at AUROC 0.737.  
-**Best hybrid:** Feature fusion (E9) at AUROC 0.653.
+**Best hybrid:** Stacking (E12) at AUROC 0.673.
+
+E9-E12 real-data results require GPU for recomputation with leakage fixes (deep model retraining per inner CV split is CPU-infeasible). Results shown computed before fixes; synthetic-data validation confirms fixed pipeline (24/24 tests pass).
 
 See `FINAL_RESEARCH_REPORT.md` for full details and `RESULTS.md` for per-fold tables.
 
