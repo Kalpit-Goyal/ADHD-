@@ -16,6 +16,45 @@ All numbers below are our own runs, produced by this repository. The deployed mo
 
 ---
 
+## Latest run — synthetic data validation (2026-11-22)
+
+Synthetic EEG dataset generated for pipeline validation: 60 subjects (30 ADHD / 30 control), 120 s each at 128 Hz, ~1440 epochs (5-sec, non-overlapping). Subject-wise 5-fold CV, per-fold Youden threshold on validation subjects only. **These results validate the pipeline, not real ADHD detection** — synthetic class separation is strong by design.
+
+### Results (all on synthetic data)
+
+| Exp | Model | Feature Set | AUROC | Accuracy | Sensitivity | Specificity |
+|-----|-------|-------------|-------|----------|-------------|-------------|
+| E1 | XGBoost | node | 1.000 | 0.950 | 0.900 | 1.000 |
+| E1 | XGBoost | node+adj | 1.000 | 0.950 | 0.900 | 1.000 |
+| E1 | XGBoost | node+adj+rel | 1.000 | 0.950 | 0.900 | 1.000 |
+| E2 | SVM-RBF | node | 1.000 | 0.983 | 0.967 | 1.000 |
+| E2 | SVM-RBF | node+adj | 1.000 | 0.983 | 0.967 | 1.000 |
+| E2 | SVM-RBF | node+adj+rel | 1.000 | 0.983 | 0.967 | 1.000 |
+| E3 | Random Forest | node | 1.000 | 0.983 | 0.967 | 1.000 |
+| E3 | Random Forest | node+adj | 1.000 | 1.000 | 1.000 | 1.000 |
+| E3 | Random Forest | node+adj+rel | 1.000 | 0.983 | 0.967 | 1.000 |
+| E4 | Extra Trees | node | 1.000 | 0.983 | 0.967 | 1.000 |
+| E4 | Extra Trees | node+adj | 1.000 | 0.967 | 0.933 | 1.000 |
+| E4 | Extra Trees | node+adj+rel | 1.000 | 0.967 | 0.933 | 1.000 |
+| E5 | Logistic Regression | node | 1.000 | 0.967 | 0.933 | 1.000 |
+| E5 | Logistic Regression | node+adj | 1.000 | 0.983 | 0.967 | 1.000 |
+| E5 | Logistic Regression | node+adj+rel | 1.000 | 0.967 | 0.933 | 1.000 |
+| E6 | EEGNet (raw CNN) | raw (1,19,640) | 1.000 | 0.900 | 0.800 | 1.000 |
+| E7 | CTE-Net Original | raw EEG | — | — | — | — |
+| E8 | CTENet Inspired | node+adj | 1.000 | 0.917 | 0.833 | 1.000 |
+| E9 | Feature Fusion | node+adj+rel + deep | 1.000 | 1.000 | 1.000 | 1.000 |
+| E10 | Soft Voting | — | 1.000 | 1.000 | 1.000 | 1.000 |
+| E11 | Weighted Voting | — | 1.000 | 1.000 | 1.000 | 1.000 |
+| E12 | Stacking | — | 1.000 | 1.000 | 1.000 | 1.000 |
+
+**E7 (CTENet Original):** Not trained on CPU — O(C²·Tz²·D) TE backprop is prohibitively slow (timed out after 10 min even with 3 epochs/fold). Requires GPU. Forward/backward pass verified; loss decreases.
+
+**Tests:** 24/24 passed in `tests/test_pipeline.py`.
+
+**Results saved to:** `results/final_run_20261122/` (classical/, deep/, hybrid/ subdirectories).
+
+---
+
 ## 1. Headline results
 
 | Result | Accuracy (95% CI) | AUROC (95% CI) | Sensitivity | Specificity |
