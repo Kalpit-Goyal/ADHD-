@@ -47,6 +47,9 @@ def _forward(
     if model_name == "eegnet":
         features, labels = batch
         logits = model(features.to(device))
+    elif model_name == "ctenet_original":
+        features, labels = batch
+        logits = model(features.to(device))
     else:
         features, adjacency, labels = batch
         logits = model(features.to(device), adjacency.to(device))

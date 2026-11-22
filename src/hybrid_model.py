@@ -102,7 +102,7 @@ def _deep_predict_proba(
     probs = []
     with torch.no_grad():
         for batch in loader:
-            if model_name == "eegnet":
+            if model_name == "eegnet" or model_name == "ctenet_original":
                 features, labels = batch
                 logits = model(features.to(device))
             else:
@@ -172,7 +172,7 @@ def _deep_features(
     with torch.no_grad():
         offset = 0
         for batch in loader:
-            if model_name == "eegnet":
+            if model_name == "eegnet" or model_name == "ctenet_original":
                 features, labels = batch
                 feat, _, _ = model.forward_features(features.to(device))
             else:
@@ -372,7 +372,7 @@ def run_feature_fusion(
                 running_loss = 0.0
                 for batch in train_loader:
                     optimizer.zero_grad(set_to_none=True)
-                    if model_name == "eegnet":
+                    if model_name == "eegnet" or model_name == "ctenet_original":
                         feats, labels_batch = batch
                         logits = fold_deep_model(feats.to(device))
                     else:
@@ -394,7 +394,7 @@ def run_feature_fusion(
                 val_subject_list = []
                 with torch.no_grad():
                     for batch in val_loader:
-                        if model_name == "eegnet":
+                        if model_name == "eegnet" or model_name == "ctenet_original":
                             feats, labels_batch = batch
                             logits = fold_deep_model(feats.to(device))
                         else:

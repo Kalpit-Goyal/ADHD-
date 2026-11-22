@@ -115,7 +115,7 @@ All splits are subject-wise: no subject appears in both training and test folds,
 | Exp | Model | Description |
 |-----|-------|-------------|
 | E6 | EEGNet | Raw-signal CNN baseline (19 channels × 640 samples) |
-| E7 | CTE-Net Original | Attempted reconstruction with differentiable TE, Rényi entropy, Takens embeddings — **architecturally fixed** (raw EEG `(B,C,T)` input supported via `build_model(name="ctenet_original")`) but **not trained on CPU** due to O(C^2·T·embed) TE computation being prohibitively slow without GPU |
+| E7 | CTE-Net Original (faithful) | Not trained on CPU | — | — | — | Faithful reconstruction of Gomez-Rivera et al. (2026) — Transformer → depthwise temporal filter → Takens embeddings → differentiable matrix-based TE (RQ kernel, Renyi α=2) → flattened off-diagonal TE → Dense(64) → Output |
 | E8 | CTE-Net Inspired | Existing graph-attention model from `src/models.py` |
 
 ### Results
@@ -123,13 +123,14 @@ All splits are subject-wise: no subject appears in both training and test folds,
 | Exp | Model | AUROC | Accuracy | Sensitivity | Specificity |
 |-----|-------|-------|----------|-------------|-------------|
 | E6 | EEGNet | **0.772** | **0.719** | **0.738** | **0.700** |
-| E7 | CTE-Net Original | Not trained on CPU | — | — | — |
+| E7 | CTE-Net Original (faithful) | Not trained on CPU | — | — | — |
 | E8 | CTE-Net Inspired | 0.609 | 0.554 | 0.574 | 0.533 |
 
 ### Key Findings (Paper 2)
 
 - **EEGNet (raw CNN)** dramatically outperforms the graph-attention CTE-Net inspired model (0.772 vs 0.609 AUROC)
-- The CTE-Net original reconstruction is architecturally complete and importable but too computationally expensive to train on CPU (O(C^2·T·embed) TE computation per batch)
+- CTE-Net Original is a **faithful reconstruction** of Gomez-Rivera et al. (2026): Transformer contextualization (d=128, L=1, nh=1) → depthwise temporal filtering (K=83, pool=4) → Takens delay-coordinate embeddings (Dx=6, Dy=1, τ=2) → differentiable matrix-based Transfer Entropy (RQ kernel, Renyi α=2) → flattened off-diagonal TE (342 dims) → Dense(64) → Output. 128,360 trainable parameters (paper: 128,578).
+- **Not trained on CPU** — O(C²·Tz²·D) TE computation with backprop is prohibitively slow without GPU (paper used NVIDIA Quadro RTX 5000, ~5-7 min per fold). Forward pass, backward pass, and loss decrease verified on CPU.
 - Raw-signal deep learning exceeds hand-crafted feature approaches on this dataset
 
 ---
@@ -234,7 +235,7 @@ All splits are subject-wise: no subject appears in both training and test folds,
 
 ## Limitations
 
-1. **CTE-Net original (E7) not trained on CPU:** The faithful reconstruction from Paper 2 is architecturally complete and importable via `build_model(name="ctenet_original")`, but the O(C^2·T·embed) differentiable transfer entropy computation is prohibitively slow on CPU for 5-fold CV with 60 epochs per fold. Full training requires GPU acceleration or reduced scope.
+1. **CTE-Net original (E7) not trained on CPU:** The faithful reconstruction from Paper 2 (Transformer → depthwise temporal filter → Takens embeddings → differentiable matrix-based TE → flattened off-diagonal TE → Dense) is architecturally complete and importable via `build_model(name="ctenet_original")`, but the O(C²·Tz²·D) differentiable transfer entropy computation with backprop is prohibitively slow on CPU for 5-fold CV. Forward pass, backward pass, and loss decrease verified on CPU. Full training requires GPU acceleration (paper used NVIDIA Quadro RTX 5000, ~5-7 min per fold).
 
 2. **CPU-only training:** No CUDA available; deep models trained on CPU with 20-30 epochs. Performance may improve with more epochs and GPU acceleration.
 
@@ -249,7 +250,7 @@ All splits are subject-wise: no subject appears in both training and test folds,
 1. **For production deployment:** Use EEGNet (E6) — best overall AUROC 0.772 — if raw EEG inference is acceptable.
 2. **For interpretable clinical use:** Use SVM-RBF with node+adj+rel features (E2) — AUROC 0.737 with clinically meaningful spectral/connectivity features.
 3. **For maximum sensitivity:** Use XGBoost with node+adj+rel features (E1) — sensitivity 0.754.
-4. **Future work:** Fix CTE-Net original to accept raw EEG input and train end-to-end; explore larger feature sets; test on external validation datasets.
+4. **Future work:** Train CTE-Net Original on GPU to complete E7; explore larger feature sets; test on external validation datasets.
 
 ---
 

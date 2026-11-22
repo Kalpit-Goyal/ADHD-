@@ -259,10 +259,16 @@ def build_model(
             n_heads=config.n_heads,
             n_layers=config.n_layers,
             dropout=config.dropout,
-            embed_dim=3,
-            embed_delay=1,
-            use_te=True,
-            use_rq_kernel=True,
+            embed_dim_source=6,
+            embed_dim_target=1,
+            embed_delay=2,
+            te_alpha=2.0,
+            kernel_size=83,
+            pool_size=4,
+            rq_alpha=1.0,
+            rq_length_scale=1.0,
+            rq_amplitude=1.0,
+            head_hidden=64,
         )
 
     raise ValueError(f"Unknown model: {config.name}")

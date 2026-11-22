@@ -616,6 +616,11 @@ class EpochDataset(Dataset):
             raw = torch.from_numpy(self.bundle.raw[index]).float()
             return raw, label
 
+        if self.model_name == "ctenet_original":
+            # CTE-Net Original takes raw EEG (C, T) per epoch.
+            raw = torch.from_numpy(self.bundle.raw[index][0]).float()
+            return raw, label
+
         node = torch.from_numpy(self.bundle.node_features[index]).float()
         adjacency = torch.from_numpy(self.bundle.adjacency[index]).float()
         return node, adjacency, label

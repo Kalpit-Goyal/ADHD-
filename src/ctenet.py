@@ -285,26 +285,31 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class CTENetOriginal(nn.Module):
-    """Attempted reconstruction of CTE-Net (Gomez-Rivera et al., 2026).
+    """Faithful reconstruction of CTE-Net (Gomez-Rivera et al., 2026).
 
-    Architecture (attempted):
-        1. Channel-wise nonlinear temporal filters on raw EEG.
-        2. Takens delay-coordinate embedding per channel.
-        3. Differentiable Transfer Entropy -> directed connectivity (C, C).
-        4. Rational quadratic kernel soft-connectivity.
-        5. Rényi alpha entropy per channel.
-        6. Transformer encoder over channel representations with connectivity bias.
-        7. Attention pooling -> participant-level prediction.
+    Architecture matches the paper (Sensors 2026, 26(18):5786):
 
-    Missing / approximated components (documented, not hidden):
-        * The exact nonlinear filter design from the paper is not public;
-          a small per-channel Conv1d + Tanh is used as a stand-in.
-        * The exact TE estimator (matrix-based, Rényi with rational-quadratic
-          kernels on joint distributions) is approximated by a pairwise
-          differentiable estimator; it is O(C^2 * T * embed) per batch.
-        * The rational quadratic kernel is applied to flattened delay
-          features rather than the paper's specific formulation.
-        * No claim is made that this is an exact reproduction.
+        Block 1: Transformer-based contextualization
+            X (C,T) -> transpose -> LayerNorm -> Linear(C->d) ->
+            TransformerEncoder(L=1, nh=1, d_ff=d, p=0.5) ->
+            LayerNorm -> Linear(d->C) -> transpose -> X_f (C,T)
+            d=128, no positional encoding.
+
+        Block 2: Differentiable directed Transfer Entropy
+            DWConv1d(K=83) -> ReLU -> AvgPool(pool=4) -> BatchNorm -> phi (C,T_phi)
+            Takens embeddings: Dx=6 (source past), Dy=1 (target past), target present
+            tau=2, valid anchors Tz computed dynamically
+            Bias-free linear projections per state
+            RQ kernel Gram matrices (a=1, l=1, alpha_RQ=1)
+            TE = H(Ky_past, Kx) - H(Ky_present, Ky_past, Kx)
+                 + H(Ky_present, Ky_past) - H(Ky_past)
+            H_alpha(A) = -log(||N(A)||_F^2) for alpha=2 (Renyi order 2)
+            N(A) = A / tr(A)
+            Output: TE (C,C), asymmetric, diagonal excluded
+
+        Block 3: Classification
+            Flatten off-diagonal TE -> C*(C-1) dims
+            Dropout(0.5) -> Dense(64) -> ReLU -> Dropout(0.5) -> Dense(1) -> sigmoid
 
     Input
     -----
@@ -313,165 +318,349 @@ class CTENetOriginal(nn.Module):
     Output
     ------
     logits : (B,) ADHD logit.
-    features : (B, d_model) learned participant representation (accessible
-               via ``forward_features``).
+    features : (B, C*(C-1)) flattened off-diagonal TE (via ``forward_features``).
     """
 
     def __init__(
         self,
         n_channels: int = 19,
-        n_times: int = 640,
-        d_model: int = 64,
-        n_heads: int = 4,
-        n_layers: int = 2,
-        dropout: float = 0.25,
-        embed_dim: int = 3,
-        embed_delay: int = 1,
-        te_alpha: float = 0.5,
-        use_te: bool = True,
-        use_rq_kernel: bool = True,
+        n_times: int = 512,
+        d_model: int = 128,
+        n_heads: int = 1,
+        n_layers: int = 1,
+        dropout: float = 0.5,
+        embed_dim_source: int = 6,
+        embed_dim_target: int = 1,
+        embed_delay: int = 2,
+        te_alpha: float = 2.0,
+        kernel_size: int = 83,
+        pool_size: int = 4,
+        rq_alpha: float = 1.0,
+        rq_length_scale: float = 1.0,
+        rq_amplitude: float = 1.0,
+        head_hidden: int = 64,
     ):
         super().__init__()
         self.n_channels = n_channels
+        self.n_times = n_times
         self.d_model = d_model
-        self.use_te = use_te
-        self.use_rq_kernel = use_rq_kernel
+        self.te_alpha = te_alpha
+        self.embed_dim_source = embed_dim_source
+        self.embed_dim_target = embed_dim_target
+        self.embed_delay = embed_delay
+        self.kernel_size = kernel_size
+        self.pool_size = pool_size
+        self.rq_alpha = rq_alpha
+        self.rq_length_scale = rq_length_scale
+        self.rq_amplitude = rq_amplitude
 
-        # 1. Channel-wise nonlinear temporal filters.
-        self.temporal_filter = ChannelWiseNonlinearTemporalFilter(
-            n_channels, kernel_size=7, dropout=dropout
+        # ------------------------------------------------------------------
+        # Block 1: Transformer-based contextualization
+        # ------------------------------------------------------------------
+        # Input projection: (T, C) -> (T, d), with LayerNorm
+        self.input_norm = nn.LayerNorm(n_channels)
+        self.input_proj = nn.Linear(n_channels, d_model)
+
+        # Transformer encoder: L layers, nh heads, d_ff = d_model
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=d_model,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
         )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # 2. Takens delay-coordinate embedding.
-        self.takens = TakensDelayEmbedding(embedding_dim=embed_dim, delay=embed_delay)
-        # After Takens: time dimension shrinks to T - (embed_dim-1)*delay.
-        takens_reduction = (embed_dim - 1) * embed_delay
-        self.takens_n_times = n_times - takens_reduction
-        if self.takens_n_times <= 0:
-            self.takens_n_times = 1
+        # Channel projection: (T, d) -> (T, C), with LayerNorm
+        self.channel_proj = nn.Linear(d_model, n_channels)
+        self.channel_norm = nn.LayerNorm(n_channels)
 
-        # Feature dimension after filter + takens + entropy.
-        self.embed_dim = embed_dim
-        self.te_feature_dim = d_model
-
-        # 3-5. Connectivity + entropy (computed in forward, not parameters).
-        self.te = DifferentiableTransferEntropy(
-            n_channels=n_channels,
-            alpha=te_alpha,
-            kernel_alpha=1.0,
-            kernel_length_scale=1.0,
-            embed_dim=embed_dim,
-            embed_delay=embed_delay,
-        ) if use_te else None
-
-        self.rq_kernel = RationalQuadraticKernel(alpha=1.0, length_scale=1.0) if use_rq_kernel else None
-
-        # Project temporal features to d_model.
-        # After Takens, each channel has embed_dim * takens_n_times values.
-        # We pool over time to get embed_dim per channel, then project.
-        self.input_projection = nn.Linear(embed_dim, d_model)
-
-        # 6. Transformer encoder.
-        self.layers = nn.ModuleList(
-            [
-                TransformerEncoderLayer(d_model, n_heads, dropout=dropout)
-                for _ in range(n_layers)
-            ]
+        # ------------------------------------------------------------------
+        # Block 2: Channel-wise temporal filtering
+        # ------------------------------------------------------------------
+        self.temporal_filter = nn.Conv1d(
+            n_channels,
+            n_channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=n_channels,
+            bias=True,
         )
+        self.filter_activation = nn.ReLU()
+        self.filter_pool = nn.AvgPool1d(kernel_size=pool_size, stride=pool_size)
+        self.filter_norm = nn.BatchNorm1d(n_channels)
 
-        # Connectivity bias injected into attention (like the inspired model).
-        self.edge_bias = nn.Linear(1, n_heads)
+        # Trainable bias-free linear projections for Takens states
+        self.proj_source = nn.Linear(embed_dim_source, embed_dim_source, bias=False)
+        self.proj_target_past = nn.Linear(embed_dim_target, embed_dim_target, bias=False)
+        self.proj_target_present = nn.Linear(1, 1, bias=False)
 
-        # 7. Attention pooling + head.
-        self.pool_score = nn.Linear(d_model, 1)
+        # ------------------------------------------------------------------
+        # Block 3: Classification head on flattened off-diagonal TE
+        # ------------------------------------------------------------------
+        te_flat_dim = n_channels * (n_channels - 1)
         self.head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),
+            nn.Linear(te_flat_dim, head_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(head_hidden, 1),
         )
 
+    # ------------------------------------------------------------------
+    # Kernel / entropy utilities
+    # ------------------------------------------------------------------
+    def _rq_kernel_matrix(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+        """Rational quadratic kernel Gram matrix.
+
+        X: (B, N, D), Y: (B, M, D) -> (B, N, M)
+        K(x,y) = a^2 * (1 + ||x-y||^2 / (2 * alpha_RQ * l^2)) ^ (-alpha_RQ)
+        """
+        a2 = self.rq_amplitude ** 2
+        l2 = self.rq_length_scale ** 2
+        denom = 2.0 * self.rq_alpha * l2
+
+        x_sq = torch.sum(X ** 2, dim=-1, keepdim=True)      # (B, N, 1)
+        y_sq = torch.sum(Y ** 2, dim=-1, keepdim=True)      # (B, M, 1)
+        xy = torch.matmul(X, Y.transpose(-1, -2))           # (B, N, M)
+        sq_dist = x_sq + y_sq.transpose(-1, -2) - 2.0 * xy  # (B, N, M)
+        sq_dist = torch.clamp(sq_dist, min=0.0)
+
+        kernel = (1.0 + sq_dist / denom) ** (-self.rq_alpha)
+        return kernel * a2
+
+    def _trace_normalize(self, K: torch.Tensor) -> torch.Tensor:
+        """N(A) = A / tr(A). K: (..., N, N)"""
+        trace = torch.diagonal(K, dim1=-2, dim2=-1).sum(dim=-1, keepdim=True)
+        trace = trace.clamp_min(1e-8)
+        return K / trace.unsqueeze(-1)
+
+    def _renyi_entropy_order2(self, K: torch.Tensor) -> torch.Tensor:
+        """H_2(N(A)) = -log(||N(A)||_F^2) for symmetric N(A).
+
+        Uses ||N(A)||_F^2 = tr(N(A)^2) since N(A) is symmetric.
+        K: (..., N, N) -> (...,)
+        """
+        K_norm = self._trace_normalize(K)
+        # Frobenius norm squared = sum of squared entries
+        fro_sq = torch.sum(K_norm ** 2, dim=(-2, -1))
+        return -torch.log(fro_sq.clamp_min(1e-12))
+
+    def _joint_entropy_order2(self, *kernels: torch.Tensor) -> torch.Tensor:
+        """H_2(K1 ⊙ ... ⊙ KM) via Hadamard product then entropy."""
+        joint = kernels[0]
+        for k in kernels[1:]:
+            joint = joint * k
+        return self._renyi_entropy_order2(joint)
+
+    # ------------------------------------------------------------------
+    # Transfer Entropy computation (vectorized over all channel pairs)
+    # ------------------------------------------------------------------
+    def _takens_embeddings(self, phi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build Takens delay-coordinate embeddings from filtered signal.
+
+        phi: (B, C, T_phi)
+        Returns:
+            Zx: (B, C, Tz, Dx)   source past
+            Zy_past: (B, C, Tz, Dy)   target past
+            Zy_present: (B, C, Tz, 1)  target present
+        """
+        batch, channels, t_phi = phi.shape
+        tau = self.embed_delay
+        Dx = self.embed_dim_source
+        Dy = self.embed_dim_target
+
+        min_t = max((Dx - 1) * tau, Dy * tau)
+        tz = t_phi - min_t
+        if tz <= 0:
+            raise ValueError(
+                f"Not enough time samples for Takens: t_phi={t_phi}, min_t={min_t}"
+            )
+
+        # Source past: Zx_c(t) = [phi_c(t - j*tau)]_{j=0}^{Dx-1}
+        source_frames = []
+        for j in range(Dx):
+            start = min_t - j * tau
+            source_frames.append(phi[:, :, start : start + tz])
+        Zx = torch.stack(source_frames, dim=2).transpose(2, 3)  # (B, C, Tz, Dx)
+
+        # Target past: Zy_c'(t) = [phi_c'(t - j*tau)]_{j=1}^{Dy}
+        target_past_frames = []
+        for j in range(1, Dy + 1):
+            start = min_t - j * tau
+            target_past_frames.append(phi[:, :, start : start + tz])
+        Zy_past = torch.stack(target_past_frames, dim=2).transpose(2, 3)  # (B, C, Tz, Dy)
+
+        # Target present: zy_c'(t) = phi_c'(t)
+        Zy_present = phi[:, :, min_t : min_t + tz].unsqueeze(-1)  # (B, C, Tz, 1)
+
+        return Zx, Zy_past, Zy_present
+
+    def _compute_te_vectorized(self, phi: torch.Tensor) -> torch.Tensor:
+        """Compute directed TE matrix for all channel pairs simultaneously.
+
+        phi: (B, C, T_phi)
+        Returns: TE: (B, C, C), TE[target, source] = TE(source -> target)
+        """
+        batch, channels, _ = phi.shape
+        alpha = self.te_alpha
+
+        Zx, Zy_past, Zy_present = self._takens_embeddings(phi)
+
+        # Apply bias-free linear projections
+        Zx_p = self.proj_source(Zx)           # (B, C, Tz, Dx)
+        Zy_past_p = self.proj_target_past(Zy_past)  # (B, C, Tz, Dy)
+        Zy_present_p = self.proj_target_present(Zy_present)  # (B, C, Tz, 1)
+
+        # Precompute kernel matrices per channel (source side and target side)
+        # K_x[c]: Gram of source past states for channel c -> (B, C, Tz, Tz)
+        K_x = self._batch_gram(Zx_p)   # (B, C, Tz, Tz)
+        # K_y_past[c']: Gram of target past states for channel c' -> (B, C, Tz, Tz)
+        K_y_past = self._batch_gram(Zy_past_p)  # (B, C, Tz, Tz)
+        # K_y_present[c']: Gram of target present states for channel c' -> (B, C, Tz, Tz)
+        K_y_present = self._batch_gram(Zy_present_p)  # (B, C, Tz, Tz)
+
+        # TE for all pairs via broadcasting:
+        # K_y_past[c']: (B, C, 1, Tz, Tz)  [target]
+        # K_x[c]:       (B, 1, C, Tz, Tz)  [source]
+        Kyp = K_y_past.unsqueeze(2)       # (B, C, 1, Tz, Tz)
+        Kx = K_x.unsqueeze(1)             # (B, 1, C, Tz, Tz)
+        Kyp_present = K_y_present.unsqueeze(2)  # (B, C, 1, Tz, Tz)
+
+        # Joint kernels via Hadamard product
+        # J1 = K_y_past[c'] ⊙ K_x[c]          -> (B, C, C, Tz, Tz)
+        J1 = Kyp * Kx
+        # J2 = K_y_present[c'] ⊙ K_y_past[c'] ⊙ K_x[c]
+        J2 = Kyp_present * Kyp * Kx
+        # J3 = K_y_present[c'] ⊙ K_y_past[c']
+        J3 = Kyp_present * Kyp
+        # J4 = K_y_past[c']
+        J4 = Kyp
+
+        # Entropy terms: H_2 = -log(||N(J)||_F^2)
+        # Frobenius norm squared over last two dims
+        def fro_sq(J):
+            return torch.sum(J ** 2, dim=(-2, -1))  # (B, C, C)
+
+        H1 = -torch.log(self._trace_normalize_fro(J1).clamp_min(1e-12))
+        H2 = -torch.log(self._trace_normalize_fro(J2).clamp_min(1e-12))
+        H3 = -torch.log(self._trace_normalize_fro(J3).clamp_min(1e-12))
+        H4 = -torch.log(self._trace_normalize_fro(J4).clamp_min(1e-12))
+
+        # TE = H1 - H2 + H3 - H4
+        TE = H1 - H2 + H3 - H4  # (B, C, C)
+
+        # Zero out diagonal (self-connections excluded)
+        diag_mask = torch.eye(channels, dtype=bool, device=TE.device)
+        TE = TE.masked_fill(diag_mask.unsqueeze(0), 0.0)
+
+        return TE
+
+    def _trace_normalize_fro(self, J: torch.Tensor) -> torch.Tensor:
+        """||N(J)||_F^2 where N(J) = J / tr(J).
+
+        J: (B, C, C, Tz, Tz) -> (B, C, C)
+        """
+        trace = torch.diagonal(J, dim1=-2, dim2=-1).sum(dim=-1)  # (B, C, C, Tz)
+        trace = trace.clamp_min(1e-8)
+        J_norm = J / trace.unsqueeze(-1).unsqueeze(-1)  # (B, C, C, Tz, Tz)
+        return torch.sum(J_norm ** 2, dim=(-2, -1))  # (B, C, C)
+
+    def _batch_gram(self, X: torch.Tensor) -> torch.Tensor:
+        """Gram matrices per channel via RQ kernel.
+
+        X: (B, C, Tz, D) -> (B, C, Tz, Tz)
+        Computes K[X[b,c,i], X[b,c,j]] for all i,j per channel.
+        """
+        batch, channels, tz, d = X.shape
+        # Flatten batch and channel for batched kernel computation
+        X_flat = X.reshape(batch * channels, tz, d)  # (B*C, Tz, D)
+
+        # Squared distances: ||x - y||^2
+        x_sq = torch.sum(X_flat ** 2, dim=-1, keepdim=True)   # (BC, Tz, 1)
+        xy = torch.matmul(X_flat, X_flat.transpose(-1, -2))   # (BC, Tz, Tz)
+        sq_dist = x_sq + x_sq.transpose(-1, -2) - 2.0 * xy    # (BC, Tz, Tz)
+        sq_dist = torch.clamp(sq_dist, min=0.0)
+
+        denom = 2.0 * self.rq_alpha * self.rq_length_scale ** 2
+        kernel = (1.0 + sq_dist / denom) ** (-self.rq_alpha)
+        kernel = kernel * (self.rq_amplitude ** 2)
+
+        return kernel.reshape(batch, channels, tz, tz)  # (B, C, Tz, Tz)
+
+    # ------------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------------
     def forward_features(
         self, x: torch.Tensor, adjacency: Optional[torch.Tensor] = None
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Return (features, connectivity, entropy) before the classification head.
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Return (features, connectivity) before the classification head.
 
-        features: (B, d_model) participant-level representation.
-        connectivity: (B, C, C) directed TE matrix, or None.
-        entropy: (B, C, 1) Rényi entropy per channel, or None.
+        features: (B, C*(C-1)) flattened off-diagonal TE.
+        connectivity: (B, C, C) directed TE matrix.
 
         ``adjacency`` is accepted for API compatibility with the inspired
-        CTENet model but is not used by this reconstruction (connectivity is
-        estimated internally).
+        CTENet model but is not used (connectivity is estimated internally).
         """
         # x: (B, C, T)
-        x = self.temporal_filter(x)  # (B, C, T)
 
-        # Connectivity & entropy from filtered signal.
-        connectivity = None
-        entropy = None
-        if self.use_te and self.te is not None:
-            connectivity = self.te(x)  # (B, C, C)
-        if self.use_rq_kernel and self.rq_kernel is not None:
-            # Soft kernel connectivity as an auxiliary signal.
-            pooled = x.mean(dim=-1)  # (B, C)
-            kernel_conn = self.rq_kernel(pooled.unsqueeze(-1), pooled.unsqueeze(-1))  # (B, C, C)
-            if connectivity is None:
-                connectivity = kernel_conn
-            else:
-                connectivity = 0.5 * connectivity + 0.5 * kernel_conn
+        # ---- Block 1: Transformer contextualization ----
+        # Transpose to (B, T, C) for sequence processing
+        x_t = x.transpose(1, 2)  # (B, T, C)
 
-        # Takens embedding: (B, C, T) -> (B, C*embed_dim, T')
-        embedded = self.takens(x)  # (B, C*embed_dim, T')
-        batch, _, _ = embedded.shape
+        # Input projection with LayerNorm
+        E = self.input_norm(x_t)
+        E = self.input_proj(E)  # (B, T, d)
 
-        # Reshape to (B, C, embed_dim, T'), pool over time -> (B, C, embed_dim)
-        embedded = embedded.reshape(batch, self.n_channels, self.embed_dim, -1)
-        embedded = embedded.mean(dim=-1)  # (B, C, embed_dim)
+        # Transformer encoder
+        H = self.transformer(E)  # (B, T, d)
 
-        # Project to d_model.
-        hidden = self.input_projection(embedded)  # (B, C, d_model)
+        # Channel projection back to C
+        X_f_t = self.channel_proj(H)
+        X_f_t = self.channel_norm(X_f_t)  # (B, T, C)
 
-        # Add connectivity bias to attention layers.
-        for layer in self.layers:
-            # Build an attention mask bias from connectivity.
-            if connectivity is not None:
-                bias = self.edge_bias(connectivity.unsqueeze(-1))  # (B, C, C, H)
-                bias = bias.permute(0, 3, 1, 2)  # (B, H, C, C)
-            else:
-                bias = None
-            # MultiheadAttention doesn't accept a per-head additive bias directly;
-            # we add it via the attn_mask (additive). Convert bias to (B*H, C, C).
-            if bias is not None:
-                b, h, c, _ = bias.shape
-                mask = bias.reshape(b * h, c, c)
-            else:
-                mask = None
-            hidden = layer(hidden, attn_mask=mask)
+        # Transpose back to (B, C, T)
+        X_f = X_f_t.transpose(1, 2)  # (B, C, T)
 
-        # Attention pooling over channels.
-        scores = self.pool_score(hidden).squeeze(-1)  # (B, C)
-        weights = torch.softmax(scores, dim=1)
-        features = (hidden * weights.unsqueeze(-1)).sum(dim=1)  # (B, d_model)
-        return features, connectivity, entropy
+        # ---- Block 2: Temporal filtering ----
+        phi = self.temporal_filter(X_f)   # (B, C, T)
+        phi = self.filter_activation(phi)
+        phi = self.filter_pool(phi)       # (B, C, T_phi)
+        phi = self.filter_norm(phi)       # (B, C, T_phi)
+
+        # ---- Block 2: Transfer Entropy ----
+        connectivity = self._compute_te_vectorized(phi)  # (B, C, C)
+
+        # ---- Block 3: Flatten off-diagonal TE ----
+        mask = ~torch.eye(self.n_channels, dtype=bool, device=connectivity.device)
+        features = connectivity[:, mask]  # (B, C*(C-1))
+
+        return features, connectivity
 
     def forward(self, x: torch.Tensor, adjacency: Optional[torch.Tensor] = None) -> torch.Tensor:
-        features, _, _ = self.forward_features(x, adjacency)
+        features, _ = self.forward_features(x)
         return self.head(features).squeeze(-1)
 
 
 def build_ctenet_original(
     n_channels: int = 19,
-    n_times: int = 640,
-    d_model: int = 64,
-    n_heads: int = 4,
-    n_layers: int = 2,
-    dropout: float = 0.25,
-    embed_dim: int = 3,
-    embed_delay: int = 1,
-    use_te: bool = True,
-    use_rq_kernel: bool = True,
+    n_times: int = 512,
+    d_model: int = 128,
+    n_heads: int = 1,
+    n_layers: int = 1,
+    dropout: float = 0.5,
+    embed_dim_source: int = 6,
+    embed_dim_target: int = 1,
+    embed_delay: int = 2,
+    te_alpha: float = 2.0,
+    kernel_size: int = 83,
+    pool_size: int = 4,
+    rq_alpha: float = 1.0,
+    rq_length_scale: float = 1.0,
+    rq_amplitude: float = 1.0,
+    head_hidden: int = 64,
 ) -> CTENetOriginal:
     return CTENetOriginal(
         n_channels=n_channels,
@@ -480,11 +669,16 @@ def build_ctenet_original(
         n_heads=n_heads,
         n_layers=n_layers,
         dropout=dropout,
-        embed_dim=embed_dim,
+        embed_dim_source=embed_dim_source,
+        embed_dim_target=embed_dim_target,
         embed_delay=embed_delay,
-        te_alpha=0.5,
-        use_te=use_te,
-        use_rq_kernel=use_rq_kernel,
+        te_alpha=te_alpha,
+        kernel_size=kernel_size,
+        pool_size=pool_size,
+        rq_alpha=rq_alpha,
+        rq_length_scale=rq_length_scale,
+        rq_amplitude=rq_amplitude,
+        head_hidden=head_hidden,
     )
 
 
@@ -495,32 +689,29 @@ def build_ctenet_original(
 DOCUMENTED_GAPS = """
 CTENetOriginal deviations from Gomez-Rivera et al. (2026):
 
-1. Channel-wise nonlinear temporal filters: the paper's exact filter design
-   is not publicly specified; a per-channel depthwise Conv1d + Tanh is used.
+1. Input window length: the paper uses T=512 (4 seconds at 128 Hz) with 50%
+   overlap; this implementation accepts configurable T (default 512).
+   The repository's main pipeline uses T=640 (5 seconds), which differs.
 
-2. Differentiable Transfer Entropy: the paper uses a matrix-based Rényi
-   entropy estimator with rational-quadratic kernels over joint delay-embedded
-   distributions. This implementation uses a pairwise approximate estimator
-   that is O(C^2 * T * embed_dim) per batch and may not match the paper's
-   exact values.
+2. Channel order: the paper uses [Fz, Cz, Pz, C3, T3, C4, T4, Fp1, Fp2, F3,
+   F4, F7, F8, P3, P4, T5, T6, O1, O2]; this implementation uses
+   [Fp1, Fp2, F3, F4, C3, C4, P3, P4, O1, O2, F7, F8, T7, T8, P7, P8, Fz, Cz, Pz]
+   matching the IEEE DataPort .mat channel order.
 
-3. Rényi alpha entropy: implemented via a kNN distance-based estimator
-   (Kozachenko-Leonenko style), which is differentiable but approximate.
+3. Preprocessing: the paper uses raw EEG without filtering, ICA, or artifact
+   rejection (only post-hoc window quality screening). This implementation's
+   pipeline applies band-pass filtering, notch filtering, and z-score
+   normalization by default.
 
-4. Rational quadratic kernel: implemented and used as a soft connectivity
-   measure, but applied to flattened delay features rather than the paper's
-   exact formulation.
+4. All other components (Transformer contextualization, depthwise temporal
+   filtering, Takens embeddings, bias-free linear projections, RQ kernel,
+   matrix-based Renyi alpha=2 entropy, 4-term TE formula, flattened
+   off-diagonal TE classification head) match the paper's specification.
+   Parameter values match Table 2 of the paper (d=128, L=1, nh=1, d_ff=128,
+   p=0.5, K=83, pool=4, Dx=6, Dy=1, tau=2, alpha_R=2, a=1, l=1, alpha_RQ=1,
+   H=64).
 
-5. Takens delay-coordinate embeddings: implemented per channel with
-   configurable embedding dimension and delay.
-
-6. Transformer encoder: implemented with pre-norm layers and connectivity
-   bias injected into attention scores.
-
-7. Participant-level prediction: implemented via attention pooling over
-   channels followed by a classification head.
-
-This model is an *attempted reconstruction*, not an exact reproduction.
-Components marked approximate should not be claimed as faithful to the
-original without the authors' code and exact hyperparameters.
+This is a faithful reconstruction of the published architecture. Remaining
+differences are in input window length, channel order, and preprocessing,
+which are pipeline-level choices rather than architectural ones.
 """

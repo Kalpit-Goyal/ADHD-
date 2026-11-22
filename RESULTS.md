@@ -260,7 +260,7 @@ Subject-wise 5-fold CV on 121 subjects (2,918 epochs). Feature sets: `node` = pe
 | Exp | Model | AUROC | Accuracy | Sensitivity | Specificity | Notes |
 |-----|-------|-------|----------|-------------|-------------|-------|
 | E6 | EEGNet (raw CNN) | 0.772 | 0.719 | 0.738 | 0.700 | Raw-signal CNN, best overall |
-| E7 | CTE-Net Original | — | — | — | — | Not trainable on CPU — O(C^2·T·embed) TE computation prohibitive; architecture registered in build_model() |
+| E7 | CTE-Net Original (faithful) | — | — | — | — | Faithful reconstruction of Gomez-Rivera et al. (2026) — Transformer → depthwise temporal filter → Takens embeddings → differentiable matrix-based TE (RQ kernel, Renyi α=2) → flattened off-diagonal TE → Dense(64) → Output. Architecturally complete and importable via `build_model(name="ctenet_original")`, but **not trained on CPU** — O(C²·Tz²·D) TE computation with backprop is prohibitively slow without GPU (paper used NVIDIA Quadro RTX 5000). Verified: forward pass, backward pass, and loss decrease confirmed on CPU. |
 | E8 | CTE-Net Inspired | 0.609 | 0.554 | 0.574 | 0.533 | Graph-attention model from src/models.py |
 
 **Best deep:** EEGNet (AUROC 0.772) — outperforms all classical and hybrid approaches.
