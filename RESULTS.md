@@ -93,9 +93,9 @@ All experiments on the 121-child IEEE DataPort dataset (61 ADHD / 60 control, 2,
 | Epochs | 2,918 |
 | Device | CUDA |
 
-**E7 (CTENet Original):** Architecture verified by tests; full 5-fold GPU training time-limited in this session. Forward/backward on CUDA verified.
-**E8 (CTENet Inspired):** Not trained in this session.
-**E9–E12 (Hybrid):** Code leakage-fixed and test-verified; full real-data hybrid training requires additional GPU time.
+**E7 (CTENet Original):** CUDA smoke test completed (1 epoch, 2 folds): AUROC 0.707, accuracy 0.620. Full 60-epoch 5-fold training time-limited on RTX 3050 6GB — TE computation O(C²·Tz²·D) per epoch too slow for full run within session. Forward/backward on CUDA verified by test_n_cuda_forward_backward. Architecture matches paper (d_model=128, n_heads=1, n_layers=1, dropout=0.5, kernel_size=83, valid padding).
+**E8 (CTENet Inspired):** Not trained in this session. Architecture verified by tests.
+**E9–E12 (Hybrid):** Code leakage-fixed (E11 weight derivation, E12 missing args, E9 deep_model_factory threading) and test-verified on synthetic data (test_j_end_to_end_synthetic_smoke). Full real-data hybrid training requires retraining deep models per inner CV split — time-intensive on RTX 3050 6GB.
 
 All predictions are participant-level (one probability per subject, epoch-averaged). Each subject appears in exactly one test fold.
 

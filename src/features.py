@@ -83,16 +83,15 @@ def plv_adjacency(
     return plv.astype(np.float32)
 
 
-def granger_adjacency(
+def var_coefficient_adjacency(
     epoch: np.ndarray,
     order: int = 5,
     ridge: float = 1e-3,
 ) -> np.ndarray:
     """Directed connectivity proxy from ridge-regularised VAR coefficients.
 
-    This is a fast stand-in for directed transfer entropy: ``adj[target, source]``
-    is the L2 norm across lags of the VAR coefficient linking ``source`` to
-    ``target``. It is normalised to [0, 1] per epoch.
+    ``adj[target, source]`` is the L2 norm across lags of the VAR coefficient
+    linking ``source`` to ``target``. Normalised to [0, 1] per epoch.
 
     Notes
     -----
@@ -135,6 +134,10 @@ def granger_adjacency(
     return adj.astype(np.float32)
 
 
+# Backward-compatible alias.
+granger_adjacency = var_coefficient_adjacency
+
+
 def compute_connectivity(
     epoch: np.ndarray,
     fs: float,
@@ -143,8 +146,8 @@ def compute_connectivity(
 ) -> np.ndarray:
     """Dispatch to the requested connectivity estimator."""
     method = method.lower()
-    if method in {"granger", "dte", "directed"}:
-        return granger_adjacency(epoch, order=var_order)
+    if method in {"granger", "var_coefficient"}:
+        return var_coefficient_adjacency(epoch, order=var_order)
     if method in {"plv", "phase"}:
         return plv_adjacency(epoch, fs)
     if method in {"corr", "correlation", "pearson"}:

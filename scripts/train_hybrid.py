@@ -132,7 +132,8 @@ def bundle_n_features(config) -> int:
 
 
 def bundle_n_times(config) -> int:
-    return int(getattr(config.data, "n_times", 640))
+    return int(getattr(config.data, "epoch_seconds", 5.0)
+                 * getattr(config.data, "fs", 128))
 
 
 def collect_branch_a_probs(

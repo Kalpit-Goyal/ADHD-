@@ -262,6 +262,7 @@ def _train_deep_model_on_subjects(
     seed: int,
     device: torch.device,
     model_name: str,
+    model_factory: Optional[Callable[[], torch.nn.Module]] = None,
     epochs: int = 30,
     batch_size: int = 32,
     lr: float = 1e-3,
@@ -288,11 +289,14 @@ def _train_deep_model_on_subjects(
         else np.array([], dtype=int)
     )
 
-    cfg = ModelConfig(name=model_name)
-    model = (
-        build_model(cfg, n_channels=19, n_features=6, n_times=640)
-        .to(device)
-    )
+    if model_factory is not None:
+        model = model_factory().to(device)
+    else:
+        cfg = ModelConfig(name=model_name)
+        model = (
+            build_model(cfg, n_channels=19, n_features=6, n_times=640)
+            .to(device)
+        )
 
     train_dataset = EpochDataset(bundle, train_indices, model_name)
     train_loader = DataLoader(
@@ -401,6 +405,7 @@ def _train_deep_oof(
     seed: int,
     device: torch.device,
     model_name: str,
+    model_factory: Optional[Callable[[], torch.nn.Module]] = None,
     epochs: int = 30,
     batch_size: int = 32,
     lr: float = 1e-3,
@@ -447,6 +452,7 @@ def _train_deep_oof(
         seed,
         device,
         model_name,
+        model_factory=model_factory,
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,
@@ -599,6 +605,7 @@ def run_feature_fusion(
                     seed,
                     device,
                     model_name,
+                    model_factory=deep_model_factory,
                     epochs=30,
                     batch_size=32,
                     lr=1e-3,
@@ -667,6 +674,7 @@ def run_feature_fusion(
                 seed,
                 device,
                 model_name,
+                model_factory=deep_model_factory,
                 epochs=30,
                 batch_size=32,
                 lr=1e-3,
@@ -1143,9 +1151,13 @@ def run_prediction_ensemble(
                 # NOT inner-val subjects.
                 if deep_model_factory is not None and device is not None:
                     inner_deep_probs = _train_deep_oof(
+                        bundle,
                         list(inner_tr_subjects),
                         list(inner_val_subjects),
                         seed,
+                        device,
+                        model_name,
+                        model_factory=deep_model_factory,
                         epochs=30,
                         batch_size=32,
                         lr=1e-3,
@@ -1199,6 +1211,7 @@ def run_prediction_ensemble(
                     seed,
                     device,
                     model_name,
+                    model_factory=deep_model_factory,
                     epochs=30,
                     batch_size=32,
                     lr=1e-3,

@@ -387,7 +387,7 @@ class CTENetOriginal(nn.Module):
             n_channels,
             n_channels,
             kernel_size=kernel_size,
-            padding=kernel_size // 2,
+            padding=0,
             groups=n_channels,
             bias=True,
         )

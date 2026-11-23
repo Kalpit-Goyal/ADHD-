@@ -882,8 +882,9 @@ def test_m_ctenet_original_valid_conv_dimensions() -> None:
     """CTENetOriginal forward pass must produce valid tensor shapes.
 
     Input: (B, C, T) with T=512 (4s at 128 Hz).
-    Depthwise conv K=83, pool=4 -> T_phi = floor(512/4) = 128.
-    Takens: min_t = max((6-1)*2, 1*2) = 10, Tz = 128 - 10 = 118.
+    Depthwise conv K=83, valid padding -> T_conv = 512 - 83 + 1 = 430.
+    pool=4 -> T_phi = floor(430/4) = 107.
+    Takens: min_t = max((6-1)*2, 1*2) = 10, Tz = 107 - 10 = 97.
     All intermediate shapes must be positive.
     """
     from src.ctenet import CTENetOriginal
