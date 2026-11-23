@@ -289,22 +289,36 @@ def _train_deep_model_on_subjects(
     assert set(map(str, actual_train_subjects)).isdisjoint(val_set), (
         "Train/dev participant overlap detected"
     )
-    # Fallback: if dev split consumed all train subjects, train on all of them
-    # without early stopping rather than producing an empty dataset.
+    # Never silently restore validation subjects into training.  If there are
+    # no actual training subjects after excluding validation, raise an error
+    # rather than leaking dev data into the training set.
     if len(actual_train_subjects) == 0:
-        actual_train_subjects = list(train_subjects)
-        val_indices = np.array([], dtype=int)
-    else:
-        val_indices = (
-            np.flatnonzero(np.isin(bundle.subject_ids, val_subjects))
-            if val_subjects
-            else np.array([], dtype=int)
+        raise ValueError(
+            f"No actual training subjects remain after excluding validation "
+            f"subjects {sorted(val_set)} from train subjects "
+            f"{sorted(map(str, train_subjects))}.  Cannot train deep model "
+            "without train/dev disjointness."
         )
+    val_indices = (
+        np.flatnonzero(np.isin(bundle.subject_ids, val_subjects))
+        if val_subjects
+        else np.array([], dtype=int)
+    )
     train_indices = np.flatnonzero(np.isin(bundle.subject_ids, actual_train_subjects))
     if len(train_indices) == 0:
         raise ValueError(
             f"No training epochs available for subjects {actual_train_subjects}; "
             "cannot train deep model."
+        )
+    # Assert train/dev/test participant disjointness before every training op.
+    test_subjects = getattr(bundle, "test_subjects", None)
+    if test_subjects is not None:
+        test_set = set(map(str, test_subjects))
+        assert set(map(str, actual_train_subjects)).isdisjoint(test_set), (
+            "Train/test participant overlap detected"
+        )
+        assert val_set.isdisjoint(test_set), (
+            "Dev/test participant overlap detected"
         )
 
     if model_factory is not None:
@@ -443,27 +457,47 @@ def _train_deep_oof(
         device = resolve_device("cpu")
 
     n_train = len(train_subj)
+    early_stopping_disabled_reason = None
     if n_train < 2:
         dev_subj = []
+        early_stopping_disabled_reason = (
+            f"only {n_train} training subject(s); need at least 2 for a dev split"
+        )
     else:
         # Carve out 20% of inner-train as dev for early stopping (stratified).
+        # Ensure at least one subject per class remains for training.
         train_labels = np.asarray(
             [bundle.subject_labels[str(s)] for s in train_subj], dtype=int
         )
         pos = [s for s, l in zip(train_subj, train_labels) if l == 1]
         neg = [s for s, l in zip(train_subj, train_labels) if l == 0]
         rng = np.random.default_rng(seed)
+        pos_dev_size = min(max(1, int(round(0.2 * len(pos)))), max(0, len(pos) - 1))
+        neg_dev_size = min(max(1, int(round(0.2 * len(neg)))), max(0, len(neg) - 1))
         pos_dev = (
-            rng.choice(pos, size=max(1, int(round(0.2 * len(pos)))), replace=False)
-            if pos
+            rng.choice(pos, size=pos_dev_size, replace=False)
+            if pos and pos_dev_size > 0
             else np.array([], dtype=object)
         )
         neg_dev = (
-            rng.choice(neg, size=max(1, int(round(0.2 * len(neg)))), replace=False)
-            if neg
+            rng.choice(neg, size=neg_dev_size, replace=False)
+            if neg and neg_dev_size > 0
             else np.array([], dtype=object)
         )
         dev_subj = list(pos_dev) + list(neg_dev)
+        # If dev consumed everything from a class, early stopping cannot
+        # meaningfully operate (no train subjects left for that class).
+        if len(dev_subj) >= n_train:
+            early_stopping_disabled_reason = (
+                "dev split would consume all training subjects; "
+                "training without early stopping"
+            )
+            dev_subj = []
+
+    if early_stopping_disabled_reason:
+        print(
+            f"[deep_oof] Early stopping disabled: {early_stopping_disabled_reason}"
+        )
 
     deep_model = _train_deep_model_on_subjects(
         bundle,

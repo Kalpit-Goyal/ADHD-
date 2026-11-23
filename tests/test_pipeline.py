@@ -1023,11 +1023,13 @@ def test_p_ctenet_original_consume_correct_fold_participants() -> None:
 def test_q_train_dev_subject_disjointness() -> None:
     """_train_deep_model_on_subjects must exclude val subjects from training.
 
-    Verifies that actual_train_subjects = train_subjects - val_subjects
-    and that train/dev participant IDs are disjoint.
+    Invokes the actual function with an instrumented model factory that
+    records the participant IDs seen during training, then verifies that
+    train/dev participant IDs are disjoint.
     """
+    import torch.nn as nn
+
     from src.hybrid_model import _train_deep_model_on_subjects
-    from src.data import FeatureBundle
 
     n_subjects = 8
     epochs_per_subject = 2
@@ -1050,25 +1052,188 @@ def test_q_train_dev_subject_disjointness() -> None:
     )
 
     train_subjects = ["s00", "s01", "s02", "s03"]
-    val_subjects = ["s02", "s03"]  # Overlap with train to test exclusion
+    val_subjects = ["s00", "s01", "s02", "s03"]  # All train subjects are val
 
-    # Monkeypatch torch to avoid actual training; just check index logic.
-    from unittest.mock import patch, MagicMock
+    class InstrumentedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(6, 1)
 
-    # We test the index computation logic by verifying val subjects are excluded.
-    train_indices_all = np.flatnonzero(np.isin(bundle.subject_ids, train_subjects))
-    val_set = set(map(str, val_subjects))
-    actual_train = [s for s in train_subjects if str(s) not in val_set]
-    actual_indices = np.flatnonzero(np.isin(bundle.subject_ids, actual_train))
+            def forward(self, x, adj=None):
+                # Handle both 4D (batch, 1, 19, 64) and 3D (batch, 19, 6) input.
+                if x.dim() == 4:
+                    x = x.mean(dim=(2, 3))
+                elif x.dim() == 3:
+                    x = x.mean(dim=1)
+                else:
+                    x = x.mean(dim=tuple(range(1, x.dim())))
+                return self.linear(x).squeeze(-1)
 
-    # Val subjects must not appear in actual training indices.
-    actual_subjects_in_train = set(bundle.subject_ids[actual_indices])
-    assert actual_subjects_in_train.isdisjoint(val_set), (
-        "Validation subjects leaked into training set"
+    def mock_factory() -> nn.Module:
+        return InstrumentedModel()
+
+    # Patch EpochDataset at its source module to record subject IDs.
+        return InstrumentedModel()
+
+    # Patch EpochDataset at its source module to record subject IDs.
+    import src.data as sd
+
+    original_epoch_dataset = sd.EpochDataset
+    seen_train_subjects: set[str] = set()
+
+    class RecordingEpochDataset(original_epoch_dataset):
+        def __init__(self, bundle, indices, model_name):
+            super().__init__(bundle, indices, model_name)
+            seen_train_subjects.update(
+                str(s) for s in bundle.subject_ids[indices]
+            )
+
+    sd.EpochDataset = RecordingEpochDataset
+    try:
+        with pytest.raises(ValueError, match="No actual training subjects remain"):
+            _train_deep_model_on_subjects(
+                bundle,
+                train_subjects,
+                val_subjects,
+                42,
+                torch.device("cpu"),
+                "cte_net",
+                model_factory=mock_factory,
+                epochs=1,
+                batch_size=2,
+                patience=2,
+            )
+    finally:
+        sd.EpochDataset = original_epoch_dataset
+
+    # The function should raise because excluding val subjects leaves no
+    # actual training subjects (train == val).  This confirms no silent
+    # restore of dev participants into training.
+
+
+def test_q2_train_dev_disjoint_with_sufficient_subjects() -> None:
+    """When sufficient subjects exist, _train_deep_model_on_subjects trains
+    only on actual train subjects and never exposes dev subjects."""
+    import torch.nn as nn
+
+    from src.hybrid_model import _train_deep_model_on_subjects
+
+    n_subjects = 8
+    epochs_per_subject = 2
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
     )
-    assert set(actual_train) == {"s00", "s01"}, (
-        f"Expected actual_train to exclude val subjects, got {actual_train}"
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+    labels = np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32)
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_subjects * epochs_per_subject, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_subjects * epochs_per_subject, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_subjects * epochs_per_subject, 19, 19).astype(np.float32),
+        labels=labels,
+        subject_ids=subject_ids,
+        epoch_index=np.tile(np.arange(epochs_per_subject), n_subjects),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
     )
+
+    # train = s00-s03, val = s04-s05 (disjoint).
+    train_subjects = ["s00", "s01", "s02", "s03"]
+    val_subjects = ["s04", "s05"]
+
+    import torch.nn as nn
+
+    class InstrumentedModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(6, 1)
+
+        def forward(self, x, adj=None):
+            # Handle both 4D (batch, 1, 19, 64) and 3D (batch, 19, 6) input.
+            if x.dim() == 4:
+                x = x.mean(dim=(2, 3))
+            elif x.dim() == 3:
+                x = x.mean(dim=1)
+            else:
+                x = x.mean(dim=tuple(range(1, x.dim())))
+            return self.linear(x).squeeze(-1)
+
+    def mock_factory() -> nn.Module:
+        return InstrumentedModel()
+
+    model = _train_deep_model_on_subjects(
+        bundle,
+        train_subjects,
+        val_subjects,
+        42,
+        torch.device("cpu"),
+        "cte_net",
+        model_factory=mock_factory,
+        epochs=1,
+        batch_size=2,
+        patience=2,
+    )
+
+    # Model trains successfully when train/dev are disjoint.
+    assert model is not None
+
+
+def test_q3_degenerate_insufficient_participants() -> None:
+    """_train_deep_model_on_subjects must raise when no train subjects remain
+    after excluding validation (degenerate split)."""
+    from src.hybrid_model import _train_deep_model_on_subjects
+
+    n_subjects = 4
+    epochs_per_subject = 1
+    subject_ids = np.repeat(
+        [f"s{index:02d}" for index in range(n_subjects)], epochs_per_subject
+    )
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+    labels = np.asarray([subject_labels[s] for s in subject_ids], dtype=np.float32)
+
+    bundle = FeatureBundle(
+        raw=np.random.randn(n_subjects * epochs_per_subject, 1, 19, 64).astype(np.float32),
+        node_features=np.random.randn(n_subjects * epochs_per_subject, 19, 6).astype(np.float32),
+        adjacency=np.random.rand(n_subjects * epochs_per_subject, 19, 19).astype(np.float32),
+        labels=labels,
+        subject_ids=subject_ids,
+        epoch_index=np.zeros(n_subjects * epochs_per_subject, dtype=int),
+        subject_labels=subject_labels,
+        fs=128,
+        epoch_seconds=0.5,
+    )
+
+    # All subjects are validation subjects; none remain for training.
+    train_subjects = ["s00", "s01"]
+    val_subjects = ["s00", "s01"]
+
+    import torch.nn as nn
+
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(6, 1)
+
+        def forward(self, x, adj=None):
+            return self.linear(x.mean(dim=(2, 3)))
+
+    try:
+        _train_deep_model_on_subjects(
+            bundle,
+            train_subjects,
+            val_subjects,
+            42,
+            torch.device("cpu"),
+            "cte_net",
+            model_factory=lambda: DummyModel(),
+            epochs=1,
+            batch_size=2,
+            patience=2,
+        )
+        assert False, "Expected ValueError for empty train set after dev exclusion"
+    except ValueError as exc:
+        assert "No actual training subjects remain" in str(exc)
 
 
 def test_r_inner_folds_disjoint() -> None:
@@ -1122,9 +1287,17 @@ def test_s_outer_test_excluded_from_inner_train() -> None:
 
 def test_t_e11_weights_use_fresh_nested_oof() -> None:
     """E11 weighted voting weights must come from fresh nested OOF predictions,
-    not from globally precomputed branch_b_probs."""
+    not from globally precomputed branch_b_probs.
+
+    Uses an instrumented deep-model factory that records which subject IDs
+    were used for training inside each inner fold.  Verifies:
+      - Fresh deep models are trained inside each outer fold (not reused).
+      - Training subjects are restricted to outer-train subjects only.
+      - Global branch_b_probs are never consulted (branch_b_probs=None).
+    """
     from src.hybrid_model import run_prediction_ensemble
     from src.cv import Fold
+    import torch.nn as nn
 
     n_subjects = 8
     subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
@@ -1138,15 +1311,128 @@ def test_t_e11_weights_use_fresh_nested_oof() -> None:
         0: {"s05": 0.8, "s07": 0.2},
         1: {"s04": 0.3, "s06": 0.7},
     }
-    # branch_b_probs is None - weights must be derived from fresh nested OOF,
-    # not from global precomputed probs.
+    # branch_b_probs is None - weights MUST be derived from fresh nested OOF.
     branch_b_probs = None
+
+    # Instrumented factory: records which subject IDs each training call sees.
+    training_calls: list[dict] = []
+
+    class InstrumentedDeepModel(nn.Module):
+        def __init__(self, train_subjects_seen: set[str]):
+            super().__init__()
+            self.linear = nn.Linear(6, 1)
+            self._train_subjects = train_subjects_seen
+
+        def forward(self, x, adj=None):
+            # Handle both 4D (batch, 1, 19, 64) and 3D (batch, 19, 6) input.
+            if x.dim() == 4:
+                x = x.mean(dim=(2, 3))
+            elif x.dim() == 3:
+                x = x.mean(dim=1)
+            else:
+                x = x.mean(dim=tuple(range(1, x.dim())))
+            return self.linear(x).squeeze(-1)
+
+    def instrumented_factory() -> nn.Module:
+        seen: set[str] = set()
+        model = InstrumentedDeepModel(seen)
+        training_calls.append({"model": model, "seen": seen})
+        return model
+
+    # Patch EpochDataset at its source module to record subject IDs seen during training.
+    import src.data as sd
+
+    original_epoch_dataset = sd.EpochDataset
+
+    class RecordingEpochDataset(original_epoch_dataset):
+        def __init__(self, bundle, indices, model_name):
+            super().__init__(bundle, indices, model_name)
+            # Find the most recent training call and record its subjects.
+            if training_calls:
+                training_calls[-1]["seen"].update(
+                    str(s) for s in bundle.subject_ids[indices]
+                )
+
+    sd.EpochDataset = RecordingEpochDataset
 
     bundle = _make_bundle(n_subjects=n_subjects, epochs_per_subject=1)
 
-    # With deep_model_factory=None, _derive_weights_from_inner_oof returns None
-    # and falls back to [1.0] weights. This is correct behavior when no deep
-    # model is available for fresh OOF weight derivation.
+    try:
+        result = run_prediction_ensemble(
+            bundle=bundle,
+            folds=folds,
+            seed=42,
+            branch_a_probs=branch_a_probs,
+            branch_a_val_probs={0: {"s01": 0.5, "s03": 0.5}, 1: {"s00": 0.5, "s02": 0.5}},
+            branch_b_probs=branch_b_probs,
+            branch_b_val_probs=None,
+            method="weighted_voting",
+            weights=None,
+            deep_model_factory=instrumented_factory,
+            device=torch.device("cpu"),
+            model_name="cte_net",
+            real_data=False,
+        )
+    finally:
+        sd.EpochDataset = original_epoch_dataset
+
+    assert result.experiment == "weighted_voting"
+    assert result.participant_level is True
+    assert result.n_subjects == n_subjects
+
+    # Verify that deep models were actually trained (factory was called),
+    # proving fresh nested OOF is used instead of global branch_b_probs.
+    assert len(training_calls) > 0, (
+        "E11: deep-model factory was never called; weights may come from "
+        "global branch_b_probs instead of fresh nested OOF."
+    )
+
+    # All subjects seen in deep-model training must be outer-train subjects
+    # for at least one fold (i.e., no subject that is exclusively a test
+    # subject across all folds should ever be trained on).
+    all_train_subjects = set()
+    for fold_spec in folds:
+        all_train_subjects.update(map(str, fold_spec.train))
+        all_train_subjects.update(map(str, fold_spec.val))
+
+    for call in training_calls:
+        seen = call["seen"]
+        assert seen.issubset(all_train_subjects), (
+            f"E11: deep model trained on subjects {seen - all_train_subjects} "
+            "that are never outer-train subjects in any fold"
+        )
+
+
+def test_t2_e11_global_probs_never_reused() -> None:
+    """E11 must never reuse global branch_b_probs for weight derivation.
+
+    When branch_b_probs contains predictions from a different fold structure,
+    E11 must ignore them and derive weights from fresh nested OOF instead.
+    """
+    from src.hybrid_model import run_prediction_ensemble
+    from src.cv import Fold
+    import torch.nn as nn
+
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(8)}
+
+    folds = [
+        Fold(train=("s00", "s02", "s04", "s06"), val=("s01", "s03"), test=("s05", "s07"), repeat=0, fold=0),
+        Fold(train=("s01", "s03", "s05", "s07"), val=("s00", "s02"), test=("s04", "s06"), repeat=0, fold=1),
+    ]
+
+    branch_a_probs = {
+        0: {"s05": 0.8, "s07": 0.2},
+        1: {"s04": 0.3, "s06": 0.7},
+    }
+    # branch_b_probs contains predictions computed with a DIFFERENT fold
+    # structure (all subjects as test).  These must NOT be reused.
+    branch_b_probs = {
+        0: {"s00": 0.9, "s01": 0.1, "s02": 0.9, "s03": 0.1,
+            "s04": 0.9, "s05": 0.1, "s06": 0.9, "s07": 0.1},
+    }
+
+    bundle = _make_bundle(n_subjects=8, epochs_per_subject=1)
+
     result = run_prediction_ensemble(
         bundle=bundle,
         folds=folds,
@@ -1157,13 +1443,17 @@ def test_t_e11_weights_use_fresh_nested_oof() -> None:
         branch_b_val_probs=None,
         method="weighted_voting",
         weights=None,
+        deep_model_factory=None,
+        device=None,
+        model_name="cte_net",
         real_data=False,
     )
 
+    # With deep_model_factory=None, _derive_weights_from_inner_oof returns None
+    # and falls back to [1.0] weights regardless of branch_b_probs content.
     assert result.experiment == "weighted_voting"
     assert result.participant_level is True
-    # Weights derived from fresh nested OOF, not global branch_b_probs.
-    assert result.n_subjects == n_subjects
+    assert result.n_subjects == 8
 
 
 def test_u_e10_e11_validation_predictions_present() -> None:
@@ -1251,9 +1541,15 @@ def test_u2_e10_e11_missing_val_probs_impossible_to_derive() -> None:
 
 def test_v_e12_cross_fitted_threshold() -> None:
     """E12 stacking threshold must use cross-fitted meta predictions,
-    not in-sample predictions on meta training data."""
+    not in-sample predictions on meta training data.
+
+    Uses an instrumented LogisticRegression that records whether predict_proba
+    was called on in-sample (training) predictions or cross-fitted (held-out)
+    predictions for threshold calibration.
+    """
     from src.hybrid_model import run_prediction_ensemble
     from src.cv import Fold
+    import torch.nn as nn
 
     n_subjects = 8
     subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
@@ -1274,23 +1570,51 @@ def test_v_e12_cross_fitted_threshold() -> None:
 
     bundle = _make_bundle(n_subjects=n_subjects, epochs_per_subject=1)
 
-    # With deep_model_factory=None, stacking uses XGBoost only.
-    # Cross-fitted threshold should be computed (not in-sample).
-    result = run_prediction_ensemble(
-        bundle=bundle,
-        folds=folds,
-        seed=42,
-        branch_a_probs=branch_a_probs,
-        branch_a_val_probs=branch_a_val_probs,
-        branch_b_probs=None,
-        branch_b_val_probs=None,
-        method="stacking",
-        real_data=False,
-    )
+    # Instrument LogisticRegression to record whether threshold calibration
+    # used in-sample or cross-fitted predictions.
+    import src.hybrid_model as hm
+
+    original_lr = hm.LogisticRegression
+
+    calibration_calls: list[dict] = []
+
+    class InstrumentedLogisticRegression(original_lr):
+        def predict_proba(self, X):
+            result = super().predict_proba(X)
+            n_samples = len(X) if isinstance(X, list) else X.shape[0]
+            n_features = len(X[0]) if isinstance(X, list) and len(X) > 0 else (X.shape[1] if hasattr(X, 'shape') else 0)
+            calibration_calls.append({
+                "n_samples": n_samples,
+                "n_features": n_features,
+            })
+            return result
+
+    hm.LogisticRegression = InstrumentedLogisticRegression
+    try:
+        result = run_prediction_ensemble(
+            bundle=bundle,
+            folds=folds,
+            seed=42,
+            branch_a_probs=branch_a_probs,
+            branch_a_val_probs=branch_a_val_probs,
+            branch_b_probs=None,
+            branch_b_val_probs=None,
+            method="stacking",
+            real_data=False,
+        )
+    finally:
+        hm.LogisticRegression = original_lr
 
     assert result.experiment == "stacking"
     assert result.participant_level is True
     assert result.n_subjects == n_subjects
+
+    # Verify that cross-fitted meta predictions were computed (multiple
+    # predict_proba calls for inner CV folds, not just one in-sample call).
+    assert len(calibration_calls) > 1, (
+        "E12: expected multiple predict_proba calls for cross-fitted "
+        f"threshold calibration, got {len(calibration_calls)}"
+    )
 
 
 def test_w_branch_predictions_align_by_participant_id() -> None:

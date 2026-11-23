@@ -307,15 +307,16 @@ def preprocess_recording(
         b, a = iirnotch(notch, Q=30.0, fs=fs)
         array = np.asarray(filtfilt(b, a, array, axis=0), dtype=np.float32)
 
-    low, high = float(bandpass[0]), float(bandpass[1])
-    high = min(high, nyquist - 1.0)
-    if low <= 0:
-        low = 0.1
-    if high <= low:
-        raise ValueError(f"Invalid band-pass: {bandpass} at fs={fs}")
+    if bandpass is not None:
+        low, high = float(bandpass[0]), float(bandpass[1])
+        high = min(high, nyquist - 1.0)
+        if low <= 0:
+            low = 0.1
+        if high <= low:
+            raise ValueError(f"Invalid band-pass: {bandpass} at fs={fs}")
 
-    sos = butter(4, (low, high), btype="bandpass", fs=fs, output="sos")
-    array = np.asarray(sosfiltfilt(sos, array, axis=0), dtype=np.float32)
+        sos = butter(4, (low, high), btype="bandpass", fs=fs, output="sos")
+        array = np.asarray(sosfiltfilt(sos, array, axis=0), dtype=np.float32)
 
     return array
 

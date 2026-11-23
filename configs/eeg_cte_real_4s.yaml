@@ -1,3 +1,18 @@
+# Paper-faithful CTE-Net configuration (4-second / 512-sample / 50% overlap)
+#
+# Follows Gomez-Rivera et al. (2026), Sensors 26(18):5786 as closely as the
+# available IEEE DataPort dataset permits.
+#
+# Deviations from the paper (documented, see RESULTS.md):
+#   1. Channel order: paper uses [Fz, Cz, Pz, C3, T3, C4, T4, Fp1, Fp2, F3,
+#      F4, F7, F8, P3, P4, T5, T6, O1, O2]; dataset stores
+#      [Fp1, Fp2, F3, F4, C3, C4, P3, P4, O1, O2, F7, F8, T7, T8, P7, P8, Fz,
+#      Cz, Pz]. No reordering is applied (pipeline-level choice).
+#   2. Preprocessing: paper uses raw EEG without filtering/ICA. This config
+#      disables band-pass and notch filtering but retains z-score rejection
+#      because the .npy data uses an undocumented int16 scale.
+#   3. Window length: 4s at 128 Hz = 512 samples (matches paper).
+#   4. Overlap: 50% (matches paper).
 data:
   root: data/real
   manifest: manifest.csv
@@ -5,10 +20,11 @@ data:
   fs: 128
   epoch_seconds: 4.0
   overlap: 0.5
-  bandpass: [0.5, 45.0]
-  notch: 50.0
-  # This dataset stores int16 values in an undocumented scale, so the
-  # microvolt threshold is disabled. Rejection is done in z-score units.
+  # Paper uses raw EEG without filtering; disabled for paper-faithful protocol.
+  bandpass: null
+  notch: null
+  # Dataset stores int16 values in undocumented scale; microvolt threshold
+  # disabled. Z-score rejection used for post-hoc quality screening.
   max_abs_uv: null
   max_abs_z: 10.0
   connectivity: var_coefficient

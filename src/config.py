@@ -26,7 +26,7 @@ class DataConfig:
     fs: int = 128
     epoch_seconds: float = 5.0
     overlap: float = 0.0
-    bandpass: tuple[float, float] = (0.5, 45.0)
+    bandpass: tuple[float, float] | None = (0.5, 45.0)
     notch: float | None = 50.0
     max_abs_uv: float | None = None
     max_abs_z: float | None = None
@@ -93,7 +93,7 @@ def load_config(path: str | Path) -> Config:
     raw = yaml.safe_load(text) or {}
 
     data_raw = dict(raw.get("data", {}))
-    if "bandpass" in data_raw:
+    if "bandpass" in data_raw and data_raw["bandpass"] is not None:
         data_raw["bandpass"] = tuple(float(v) for v in data_raw["bandpass"])
 
     features_raw = dict(raw.get("features", {}))
