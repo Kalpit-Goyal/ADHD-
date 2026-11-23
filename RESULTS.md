@@ -19,15 +19,15 @@ All numbers below are our own runs, produced by this repository. The deployed mo
 
 ## IMPORTANT: Experiment status
 
-| Experiment | Status | Notes |
-|---|---|---|
+| Experiment | Status | Result |
+|------------|--------|--------|
 | E1–E5 Classical | **COMPLETE** | Real data, 5-fold CV, all feature sets |
 | E6 EEGNet (CUDA) | **COMPLETE** | Real data, full epochs |
-| E7 CTE-Net Original | **INCOMPLETE (smoke test only)** | TE computation O(C²·Tz²·D) too slow for full 60-epoch on RTX 3050 6GB |
-| E8 CTENet Inspired | **PARTIAL** | Real data, 10 epochs (of 60 intended), AUROC 0.719 |
-| E9–E12 Hybrid | **INCOMPLETE (smoke test only)** | Retraining deep models per inner CV fold too slow |
+| E7 CTE-Net Original | **NOT COMPLETE (hardware-limited)** | TE computation O(C²·Tz²·D) too slow on RTX 3050 6GB — timed out after 30+ min without completing 1 epoch, even with batch_size=4 |
+| E8 CTENet Inspired | **COMPLETE** | Real data, 60 epochs with early stopping |
+| E9–E12 Hybrid | **NOT COMPLETE (hardware-limited)** | Retraining deep models per inner CV fold too slow on RTX 3050 6GB |
 
-**None of the E7–E12 numbers below should be treated as final results.** They are smoke-test / partial-run values demonstrating that the leakage-free pipeline executes correctly on real data.
+**None of the E7 or E9–E12 numbers below should be treated as final results.** They are smoke-test values demonstrating that the leakage-free pipeline executes correctly on real data. Full training requires more GPU time than available on RTX 3050 6GB.
 
 ---
 
@@ -98,26 +98,29 @@ All experiments on the 121-child IEEE DataPort dataset (61 ADHD / 60 control, 2,
 
 ---
 
-## Partial real-data results — E8 CTENet Inspired (10 of 60 epochs)
+## Complete real-data results — E8 CTENet Inspired (full 60 epochs with early stopping)
 
-Run with `configs/eeg_cte_real_4s.yaml` (4s/512-sample protocol), `--deep-model cte_net`, `--deep-epochs 10`, `--folds 5`, `--batch-size 16`, device=cuda.
+Run with `configs/eeg_cte_real_4s.yaml` (4s/512-sample protocol), `--deep-model cte_net`, `--deep-epochs 60`, `--folds 5`, `--batch-size 8`, device=cuda. Early stopping triggered per fold (not a reduction — the intended training behavior).
 
-| Fold | Train | Val | Test | AUROC | Accuracy | Threshold | Best Val AUROC |
-|------|-------|-----|------|-------|----------|-----------|----------------|
-| 1 | 76 | 20 | 25 | 0.603 | 0.640 | 0.79 | 0.820 |
-| 2 | 77 | 20 | 24 | 0.729 | 0.625 | 0.73 | 0.790 |
-| 3 | 77 | 20 | 24 | 0.750 | 0.667 | 0.74 | 0.670 |
-| 4 | 77 | 20 | 24 | 0.708 | 0.708 | 0.63 | 0.740 |
-| 5 | 77 | 20 | 24 | 0.771 | 0.583 | 0.82 | 0.790 |
+| Fold | Train | Val | Test | AUROC | Accuracy | Threshold | Best Val AUROC | Epochs |
+|------|-------|-----|------|-------|----------|-----------|----------------|--------|
+| 1 | 76 | 20 | 25 | 0.558 | 0.480 | 0.52 | 0.790 | 15 |
+| 2 | 77 | 20 | 24 | 0.375 | 0.458 | 0.35 | 0.880 | 22 |
+| 3 | 77 | 20 | 24 | 0.632 | 0.583 | 0.43 | 0.740 | 23 |
+| 4 | 77 | 20 | 24 | 0.736 | 0.625 | 0.63 | 0.720 | 15 |
+| 5 | 77 | 20 | 24 | 0.889 | 0.750 | 0.38 | 0.730 | 18 |
 
 | Metric | Value |
 |--------|-------|
-| AUROC (mean) | 0.719 |
-| Accuracy (mean) | 0.645 |
-| Sensitivity | 0.557 |
-| Specificity | 0.733 |
+| AUROC (mean) | 0.569 |
+| Accuracy (mean) | 0.579 |
+| Sensitivity | 0.525 |
+| Specificity | 0.633 |
+| Subjects | 121 |
+| Epochs | 7,665 |
+| Device | CUDA |
 
-**Note:** This is a partial run (10 of 60 intended epochs). Not a complete experiment.
+**Note:** Wide per-fold variation (AUROC 0.375–0.889) is expected with only 24–25 test subjects per fold. Early stopping is the intended training behavior, not experiment truncation.
 
 ---
 
