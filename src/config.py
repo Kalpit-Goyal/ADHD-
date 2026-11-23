@@ -20,7 +20,7 @@ DEFAULT_BANDS: dict[str, tuple[float, float]] = {
 
 @dataclass
 class DataConfig:
-    root: str = "data/synthetic"
+    root: str = "data/real"
     manifest: str = "manifest.csv"
     n_channels: int = 19
     fs: int = 128
@@ -47,11 +47,11 @@ class FeatureConfig:
 
 @dataclass
 class ModelConfig:
-    name: str = "cte_net"  # cte_net | eegnet
-    d_model: int = 64
-    n_heads: int = 4
-    n_layers: int = 2
-    dropout: float = 0.25
+    name: str = "ctenet_original"  # cte_net | ctenet_original | eegnet
+    d_model: int = 128
+    n_heads: int = 1
+    n_layers: int = 1
+    dropout: float = 0.5
     eegnet_f1: int = 8
     eegnet_d: int = 2
     eegnet_f2: int = 16

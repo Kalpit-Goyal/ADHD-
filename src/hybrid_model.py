@@ -394,6 +394,79 @@ def _train_deep_model_on_subjects(
     return model
 
 
+def _train_deep_oof(
+    bundle,
+    train_subj: list[str],
+    val_subj: list[str],
+    seed: int,
+    device: torch.device,
+    model_name: str,
+    epochs: int = 30,
+    batch_size: int = 32,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-4,
+    patience: int = 10,
+) -> dict[str, float]:
+    """Train a deep model on train_subj, return subject-level OOF probs for val_subj.
+
+    Uses a separate early-stopping dev split carved from train_subj so that
+    val_subj labels never influence checkpoint selection.
+    """
+    from src.train import resolve_device
+
+    if device is None:
+        device = resolve_device("cpu")
+
+    n_train = len(train_subj)
+    if n_train < 2:
+        dev_subj = []
+    else:
+        # Carve out 20% of inner-train as dev for early stopping (stratified).
+        train_labels = np.asarray(
+            [bundle.subject_labels[str(s)] for s in train_subj], dtype=int
+        )
+        pos = [s for s, l in zip(train_subj, train_labels) if l == 1]
+        neg = [s for s, l in zip(train_subj, train_labels) if l == 0]
+        rng = np.random.default_rng(seed)
+        pos_dev = (
+            rng.choice(pos, size=max(1, int(round(0.2 * len(pos)))), replace=False)
+            if pos
+            else np.array([], dtype=object)
+        )
+        neg_dev = (
+            rng.choice(neg, size=max(1, int(round(0.2 * len(neg)))), replace=False)
+            if neg
+            else np.array([], dtype=object)
+        )
+        dev_subj = list(pos_dev) + list(neg_dev)
+
+    deep_model = _train_deep_model_on_subjects(
+        bundle,
+        train_subj,
+        dev_subj,
+        seed,
+        device,
+        model_name,
+        epochs=epochs,
+        batch_size=batch_size,
+        lr=lr,
+        weight_decay=weight_decay,
+        patience=patience,
+    )
+
+    # Extract participant-level probabilities for val_subj.
+    val_subject_arr = np.asarray(val_subj, dtype=object)
+    deep_probs = _deep_predict_proba(
+        deep_model,
+        bundle,
+        val_subject_arr,
+        device,
+        batch_size=batch_size,
+        model_name=model_name,
+    )
+    return {str(s): float(p) for s, p in zip(val_subj, deep_probs)}
+
+
 def run_feature_fusion(
     bundle,
     folds: list[Fold],
@@ -404,18 +477,23 @@ def run_feature_fusion(
     model_name: str = "cte_net",
     real_data: bool = True,
 ) -> HybridResult:
-    """Branch C: feature-level fusion with genuine out-of-fold meta-features.
+    """Branch C: probability-level feature fusion with genuine OOF meta-features.
+
+    Uses calibrated participant-level branch probabilities as meta-features
+    instead of concatenating deep latent representations from independently
+    trained models (which do not share a coordinate system).
 
     Per outer fold:
       1. Split outer train subjects into inner subject-wise folds.
       2. For each inner fold:
-         a. Train Branch A (XGBoost) on inner-train subjects only.
-         b. Train Branch B (deep model) on inner-train subjects only,
-            using inner-val for early stopping.
-         c. Generate OOF XGBoost probabilities for inner-val subjects.
-         d. Extract OOF deep features for inner-val subjects.
-      3. Concatenate all inner-val OOF predictions -> OOF fused features
-         for every outer-train subject.
+         a. Split inner-train into sub-train / sub-dev for early stopping.
+         b. Train Branch A (XGBoost) on inner-train only.
+         c. Train Branch B (deep model) on inner-train only,
+            using sub-dev for early stopping/checkpoint selection.
+         d. Generate OOF XGBoost participant-level probabilities for inner-val.
+         e. Generate OOF deep model participant-level probabilities for inner-val.
+      3. Concatenate all inner-val OOF probabilities -> OOF fused features
+         [xgb_prob, deep_prob] for every outer-train subject.
       4. Train Logistic Regression meta-classifier on OOF fused features.
       5. Train final Branch A + Branch B on all outer-train subjects.
       6. Tune meta-classifier threshold on outer-val subjects using
@@ -426,6 +504,8 @@ def run_feature_fusion(
 
     Meta-classifier is trained on OOF training-fold outputs only -- never on
     in-sample predictions. Deep model is never trained on test subjects.
+    Validation subjects used for early stopping never contribute OOF features
+    to the meta-classifier.
     """
     from collections.abc import Callable
     from torch.utils.data import DataLoader
@@ -435,6 +515,7 @@ def run_feature_fusion(
         aggregate_subject_probs,
         indices_for_subjects,
         resolve_device,
+        train_one_fold,
     )
     from src.models import build_model as _build_model_from_config
 
@@ -445,9 +526,6 @@ def run_feature_fusion(
     a_features = _build_epoch_features(bundle, feature_set)
 
     subject_list = np.asarray(sorted(bundle.subject_labels), dtype=object)
-    subject_labels_arr = np.asarray(
-        [bundle.subject_labels[str(s)] for s in subject_list], dtype=int
-    )
     all_subject_labels = dict(bundle.subject_labels)
 
     probs = np.zeros(len(bundle.labels), dtype=float)
@@ -474,14 +552,12 @@ def run_feature_fusion(
         test_index = np.flatnonzero(np.isin(bundle.subject_ids, test_subjects))
 
         # ----- Step 1: Inner CV on outer train subjects -----
-        # Generate OOF XGBoost predictions and OOF deep features for
-        # every outer-train subject using models that never saw that subject.
         inner_folds = _make_inner_folds(
             train_subjects, all_subject_labels, n_splits=n_inner, seed=seed
         )
 
         oof_a_probs: dict[str, float] = {}
-        oof_deep: dict[str, np.ndarray] = {}
+        oof_b_probs: dict[str, float] = {}
 
         for inner_train_subj, inner_val_subj in inner_folds:
             if len(inner_val_subj) == 0:
@@ -511,12 +587,15 @@ def run_feature_fusion(
             for sid, p in inner_val_subject_probs.items():
                 oof_a_probs[str(sid)] = float(p)
 
-            # Branch B: Deep model on inner-train, extract features for inner-val (OOF).
+            # Branch B: Deep model on inner-train, OOF probs for inner-val.
+            # Early stopping uses a dev split carved from inner-train,
+            # NOT the inner-val subjects (to avoid label leakage into
+            # checkpoint selection).
             if deep_model_factory is not None:
-                inner_deep_model = _train_deep_model_on_subjects(
+                inner_deep_probs = _train_deep_oof(
                     bundle,
-                    inner_train_subj,
-                    inner_val_subj,
+                    list(inner_train_subj),
+                    list(inner_val_subj),
                     seed,
                     device,
                     model_name,
@@ -526,47 +605,29 @@ def run_feature_fusion(
                     weight_decay=1e-4,
                     patience=10,
                 )
-                inner_val_subject_arr = np.asarray(inner_val_subj, dtype=object)
-                inner_deep_feats = _deep_features(
-                    inner_deep_model,
-                    bundle,
-                    inner_val_subject_arr,
-                    device,
-                    model_name=model_name,
-                    raise_on_missing=True,
-                )
-                for i, sid in enumerate(inner_val_subj):
-                    oof_deep[str(sid)] = inner_deep_feats[i]
+                oof_b_probs.update(inner_deep_probs)
 
-        # Verify every outer-train subject has OOF features.
-        missing = [s for s in train_subjects if str(s) not in oof_a_probs]
-        if missing:
+        # Verify every outer-train subject has OOF predictions.
+        missing_a = [s for s in train_subjects if str(s) not in oof_a_probs]
+        if missing_a:
             raise RuntimeError(
-                f"Fold {fold}: missing OOF XGBoost predictions for {missing}"
+                f"Fold {fold}: missing OOF XGBoost predictions for {missing_a}"
             )
         if deep_model_factory is not None:
-            missing_deep = [s for s in train_subjects if str(s) not in oof_deep]
-            if missing_deep:
+            missing_b = [s for s in train_subjects if str(s) not in oof_b_probs]
+            if missing_b:
                 raise RuntimeError(
-                    f"Fold {fold}: missing OOF deep features for {missing_deep}"
+                    f"Fold {fold}: missing OOF deep predictions for {missing_b}"
                 )
 
-        # ----- Step 2: Train meta-classifier on OOF fused features -----
-        d_model = (
-            next(iter(oof_deep.values())).shape[0]
-            if oof_deep
-            else 64
-        )
-
+        # ----- Step 2: Train meta-classifier on OOF fused probabilities -----
         X_oof = []
         y_oof = []
         for sid in train_subjects:
             sid_str = str(sid)
             row = [oof_a_probs[sid_str]]
-            if oof_deep:
-                row.extend(oof_deep[sid_str].tolist())
-            else:
-                row.extend([0.0] * d_model)
+            if deep_model_factory is not None:
+                row.append(oof_b_probs[sid_str])
             X_oof.append(row)
             y_oof.append(all_subject_labels[sid_str])
 
@@ -617,26 +678,25 @@ def run_feature_fusion(
         val_a_prob = branch_a.predict_proba(a_features[val_index])[:, 1]
         val_a_map = _subject_probs(val_a_prob, bundle.subject_ids[val_index])
 
-        val_deep_feats = None
+        val_b_probs = None
         if final_deep_model is not None:
             val_subject_arr = np.asarray(val_subjects, dtype=object)
-            val_deep_feats = _deep_features(
+            val_b_arr = _deep_predict_proba(
                 final_deep_model,
                 bundle,
                 val_subject_arr,
                 device,
+                batch_size=32,
                 model_name=model_name,
-                raise_on_missing=True,
             )
+            val_b_probs = {str(s): float(p) for s, p in zip(val_subjects, val_b_arr)}
 
         val_fused = []
         for i, sid in enumerate(val_subjects):
             sid_str = str(sid)
             row = [float(val_a_map[sid_str])]
-            if val_deep_feats is not None:
-                row.extend(val_deep_feats[i].tolist())
-            else:
-                row.extend([0.0] * d_model)
+            if val_b_probs is not None:
+                row.append(val_b_probs[sid_str])
             val_fused.append(row)
 
         val_meta_prob = meta.predict_proba(np.asarray(val_fused, dtype=float))[:, 1]
@@ -674,26 +734,25 @@ def run_feature_fusion(
         test_a_prob = branch_a_full.predict_proba(a_features[test_index])[:, 1]
         test_a_map = _subject_probs(test_a_prob, bundle.subject_ids[test_index])
 
-        test_deep_feats = None
+        test_b_probs = None
         if final_deep_model_full is not None:
             test_subject_arr = np.asarray(test_subjects, dtype=object)
-            test_deep_feats = _deep_features(
+            test_b_arr = _deep_predict_proba(
                 final_deep_model_full,
                 bundle,
                 test_subject_arr,
                 device,
+                batch_size=32,
                 model_name=model_name,
-                raise_on_missing=True,
             )
+            test_b_probs = {str(s): float(p) for s, p in zip(test_subjects, test_b_arr)}
 
         test_fused = []
         for i, sid in enumerate(test_subjects):
             sid_str = str(sid)
             row = [float(test_a_map[sid_str])]
-            if test_deep_feats is not None:
-                row.extend(test_deep_feats[i].tolist())
-            else:
-                row.extend([0.0] * d_model)
+            if test_b_probs is not None:
+                row.append(test_b_probs[sid_str])
             test_fused.append(row)
 
         test_meta_prob = meta.predict_proba(
@@ -799,7 +858,7 @@ def run_prediction_ensemble(
     model_name: str = "cte_net",
     real_data: bool = True,
 ) -> HybridResult:
-    """Branch D: prediction-level ensemble.
+    """Branch D: prediction-level ensemble with leakage-free weight/threshold selection.
 
     branch_a_probs: {fold_index: {subject_id: prob}} for out-of-fold predictions.
     branch_b_probs: same for deep model, or None.
@@ -807,25 +866,23 @@ def run_prediction_ensemble(
     method: "soft_voting", "weighted_voting", "stacking".
 
     For soft_voting and weighted_voting, pre-computed OOF probabilities are
-    combined directly.
+    combined directly. Weights are derived from inner OOF predictions on
+    outer-training participants only -- never from outer-test labels.
 
     For stacking, proper nested cross-validation is used:
       1. Outer training participants are split into inner subject-wise folds.
       2. Base models are trained on inner-train, predict on inner-val.
-      3. OOF predictions for every outer training participant are collected.
-      4. Meta-classifier is trained on these OOF predictions.
+      3. OOF participant-level probabilities for every outer training participant
+         are collected ([xgb_prob, deep_prob]).
+      4. Meta-classifier is trained on these OOF probabilities.
       5. Base models are retrained on full outer-training participants.
-      6. Meta-classifier predicts on outer-test base-model predictions.
+      6. Meta-classifier predicts on outer-test base-model probabilities.
 
     The meta-classifier is never evaluated on the same predictions used to
-    train it. When deep_model_factory is provided, a fresh deep model is
-    trained on each inner-train split to produce genuine OOF deep features
-    (never reusing predictions from unrelated outer folds).
+    train it. Deep model early stopping uses a separate dev split carved from
+    inner-train, never the inner-val subjects that contribute OOF features.
     """
-    from sklearn.model_selection import StratifiedKFold, train_test_split
-
-    import torch
-    import torch.nn as nn
+    from sklearn.model_selection import StratifiedKFold
 
     subject_list = np.asarray(sorted(bundle.subject_labels), dtype=object)
     subject_labels_arr = np.asarray(
@@ -833,6 +890,7 @@ def run_prediction_ensemble(
     )
     index_of = {str(s): i for i, s in enumerate(subject_list)}
     n_subjects = len(subject_list)
+    all_subject_labels = dict(bundle.subject_labels)
 
     # Build Branch A features for stacking inner CV.
     feature_set = "node+adj+rel"
@@ -844,6 +902,73 @@ def run_prediction_ensemble(
     from src.evaluate import youden_threshold as _cla_youden
 
     a_features = _cla_build_features(bundle, feature_set)
+
+    def _derive_weights_from_inner_oof(
+        outer_train_subj: list[str],
+        n_inner: int = 3,
+    ) -> Optional[list[float]]:
+        """Derive branch weights from inner OOF predictions on outer-train subjects only.
+
+        Returns [w_a, w_b] normalized to sum to 1, or None if only branch A.
+        """
+        if branch_b_probs is None:
+            return None
+
+        inner_folds = _make_inner_folds(
+            outer_train_subj, all_subject_labels, n_splits=n_inner, seed=seed
+        )
+
+        a_oof_p = []
+        a_oof_y = []
+        b_oof_p = []
+        b_oof_y = []
+
+        for inner_tr, inner_val in inner_folds:
+            if len(inner_val) == 0:
+                continue
+            for sid in inner_val:
+                sid_str = str(sid)
+                # Branch A: train XGBoost on inner-tr, predict on this sid.
+                inner_tr_index = np.flatnonzero(
+                    np.isin(bundle.subject_ids, inner_tr)
+                )
+                xgb_inner = _cla_make_model(
+                    "xgboost", seed, n_features=a_features.shape[1], k=150
+                )
+                xgb_inner.fit(
+                    a_features[inner_tr_index],
+                    bundle.labels[inner_tr_index].astype(int),
+                )
+                sid_index = np.flatnonzero(
+                    np.isin(bundle.subject_ids, [sid])
+                )
+                sid_prob = xgb_inner.predict_proba(
+                    a_features[sid_index]
+                )[:, 1]
+                a_oof_p.append(float(sid_prob[0]))
+                a_oof_y.append(all_subject_labels[sid_str])
+
+                # Branch B: use pre-computed OOF probs from the fold where sid was test.
+                found = False
+                for f, fold_spec in enumerate(folds):
+                    if sid_str in map(str, fold_spec.test):
+                        fb = (branch_b_probs or {}).get(f, {})
+                        if sid_str in fb:
+                            b_oof_p.append(float(fb[sid_str]))
+                            b_oof_y.append(all_subject_labels[sid_str])
+                            found = True
+                        break
+
+        if not a_oof_p or not b_oof_p:
+            return None
+
+        a_auc = _safe_auc(np.asarray(a_oof_y), np.asarray(a_oof_p))
+        b_auc = _safe_auc(np.asarray(b_oof_y), np.asarray(b_oof_p))
+
+        a_w = max(a_auc - 0.5, 0.01)
+        b_w = max(b_auc - 0.5, 0.01)
+        total = a_w + b_w
+        return [a_w / total, b_w / total]
 
     if method in {"soft_voting", "weighted_voting"}:
         # ----- Direct combination of pre-computed OOF probs -----
@@ -870,75 +995,97 @@ def run_prediction_ensemble(
                         (branch_b_probs or {})[fold].get(str(s), 0.5)
                     )
 
+        # ----- Derive per-fold weights (training data only) -----
+        fold_weights: dict[int, list[float]] = {}
+        if method == "weighted_voting":
+            if weights is not None:
+                # User-provided fixed weights (same for all folds).
+                for fold in range(len(folds)):
+                    fold_weights[fold] = list(weights)
+            else:
+                # Derive weights per fold from inner OOF on outer-train subjects.
+                for fold, fold_spec in enumerate(folds):
+                    outer_train = list(fold_spec.train) + list(fold_spec.val)
+                    w = _derive_weights_from_inner_oof(outer_train)
+                    fold_weights[fold] = w if w is not None else [1.0]
+
         if method == "soft_voting":
             if b_oof is not None:
                 combined = 0.5 * a_oof + 0.5 * b_oof
             else:
                 combined = a_oof
         else:  # weighted_voting
-            if weights is None:
-                # Derive weights from OOF AUROC of each branch across all folds.
-                # OOF predictions are generated without seeing each subject
-                # during training, so their AUROC is a valid branch-quality proxy.
-                a_all_p = []
-                a_all_y = []
-                b_all_p = []
-                b_all_y = []
-                for f, fold_spec in enumerate(folds):
-                    for s in fold_spec.test:
-                        sid = str(s)
-                        fa = branch_a_probs.get(f, {})
-                        if sid in fa:
-                            a_all_p.append(float(fa[sid]))
-                            a_all_y.append(bundle.subject_labels[sid])
-                        if b_oof is not None:
-                            fb = (branch_b_probs or {}).get(f, {})
-                            if sid in fb:
-                                b_all_p.append(float(fb[sid]))
-                                b_all_y.append(bundle.subject_labels[sid])
+            combined = np.zeros(n_subjects, dtype=float)
+            for fold, fold_spec in enumerate(folds):
+                test_subjects = list(fold_spec.test)
+                w = fold_weights.get(fold, [1.0])
+                for s in test_subjects:
+                    idx = index_of[str(s)]
+                    a_p = float(a_oof[idx])
+                    if b_oof is not None:
+                        b_p = float(b_oof[idx])
+                        combined[idx] = (w[0] * a_p + w[1] * b_p) / sum(w)
+                    else:
+                        combined[idx] = a_p
 
-                a_auc = _safe_auc(np.asarray(a_all_y), np.asarray(a_all_p)) if a_all_p else 0.5
-                if b_oof is not None and b_all_p:
-                    b_auc = _safe_auc(np.asarray(b_all_y), np.asarray(b_all_p))
+        # ----- Threshold tuning on outer-val participants only -----
+        # For soft_voting/weighted_voting, tune threshold per fold using
+        # the combined probabilities on outer-val subjects.
+        fold_thresholds: dict[int, float] = {}
+        final_y_pred = np.zeros(n_subjects, dtype=int)
+
+        for fold, fold_spec in enumerate(folds):
+            val_subjects = list(fold_spec.val)
+            test_subjects = list(fold_spec.test)
+
+            # Val probabilities.
+            val_a = []
+            val_b = []
+            val_y = []
+            for s in val_subjects:
+                sid_str = str(s)
+                fa = branch_a_probs.get(fold, {})
+                if sid_str not in fa:
+                    continue
+                val_a.append(float(fa[sid_str]))
+                val_y.append(all_subject_labels[sid_str])
+                if b_oof is not None and fold in (branch_b_probs or {}):
+                    fb = (branch_b_probs or {}).get(fold, {})
+                    val_b.append(float(fb.get(sid_str, 0.5)))
                 else:
-                    b_auc = 0.5
+                    val_b.append(0.5)
 
-                a_w = max(a_auc - 0.5, 0.01)
-                b_w = max(b_auc - 0.5, 0.01)
-                total = a_w + b_w
-                weights = [a_w / total, b_w / total] if b_oof is not None else [1.0]
-            if b_oof is not None:
-                combined = (
-                    weights[0] * a_oof + weights[1] * b_oof
-                ) / (weights[0] + weights[1])
+            if len(val_a) > 0:
+                val_a_arr = np.asarray(val_a)
+                val_b_arr = np.asarray(val_b)
+                if method == "soft_voting":
+                    val_combined = 0.5 * val_a_arr + 0.5 * val_b_arr
+                else:
+                    w = fold_weights.get(fold, [1.0])
+                    val_combined = (w[0] * val_a_arr + w[1] * val_b_arr) / sum(w)
+
+                val_y_arr = np.asarray(val_y, dtype=int)
+                fold_thresholds[fold] = float(
+                    _cla_youden(val_y_arr, val_combined)
+                )
             else:
-                combined = a_oof
+                fold_thresholds[fold] = 0.5
 
-        y_pred = (combined >= 0.5).astype(int)
+            # Apply threshold to test subjects.
+            for s in test_subjects:
+                idx = index_of[str(s)]
+                c = float(combined[idx])
+                final_y_pred[idx] = int(c >= fold_thresholds[fold])
+
+        y_pred = final_y_pred
 
     elif method == "stacking":
-        # ----- Proper nested stacking (no data leakage) -----
-        # For each outer fold:
-        #   1. Inner CV on outer train subjects: train fresh base models on
-        #      inner-train, collect OOF predictions on inner-val.
-        #   2. Train meta-classifier on OOF features.
-        #   3. Retrain base models on full outer train+val subjects.
-        #   4. Predict on outer-test subjects using retrained base models.
+        # ----- Probability-level nested stacking (no data leakage) -----
+        # Meta-features: [xgb_participant_prob, deep_participant_prob].
         combined = np.zeros(n_subjects, dtype=float)
         a_fold_of = np.zeros(n_subjects, dtype=int)
         inner_n_splits = 3
-
-        from sklearn.model_selection import StratifiedKFold
-
-        # Build Branch A features for stacking inner CV.
-        feature_set = "node+adj+rel"
-        from src.classical_models import (
-            _build_epoch_features as _cla_build_features,
-            _subject_probs as _cla_subject_probs,
-            make_model as _cla_make_model,
-        )
-
-        a_features = _cla_build_features(bundle, feature_set)
+        fold_thresholds: dict[int, float] = {}
 
         for outer_fold, fold_spec in enumerate(folds):
             outer_test = list(fold_spec.test)
@@ -954,15 +1101,11 @@ def run_prediction_ensemble(
                 n_splits=inner_n_splits, shuffle=True, random_state=seed
             )
 
-            # OOF predictions for outer training participants.
+            # OOF participant-level probabilities for outer training participants.
             xgb_oof_train = np.zeros(len(outer_train), dtype=float)
             deep_oof_train = None
-            deep_feat_dim = 0
-
             if deep_model_factory is not None and device is not None:
-                # Determine deep feature dimension from a forward pass.
                 deep_oof_train = np.zeros(len(outer_train), dtype=float)
-                deep_feat_dim = 64
 
             for inner_tr_idx, inner_val_idx in inner_cv.split(
                 outer_train_arr, outer_train_labels
@@ -995,44 +1138,27 @@ def run_prediction_ensemble(
                     pos = int(np.where(outer_train_arr == str(sid))[0][0])
                     xgb_oof_train[pos] = float(prob)
 
-                # Deep model OOF: train fresh on inner-train, extract features
-                # for inner-val subjects. Never reuse predictions from
-                # unrelated outer folds.
+                # Deep model OOF: participant-level probabilities for inner-val.
+                # Early stopping uses a dev split carved from inner-train,
+                # NOT inner-val subjects.
                 if deep_model_factory is not None and device is not None:
-                    inner_deep_model = _train_deep_model_on_subjects(
-                        bundle,
-                        inner_tr_subjects,
-                        inner_val_subjects,
+                    inner_deep_probs = _train_deep_oof(
+                        list(inner_tr_subjects),
+                        list(inner_val_subjects),
                         seed,
-                        device,
-                        model_name,
                         epochs=30,
                         batch_size=32,
                         lr=1e-3,
                         weight_decay=1e-4,
                         patience=10,
                     )
-                    inner_val_subject_arr = np.asarray(inner_val_subjects, dtype=object)
-                    inner_deep_feats = _deep_features(
-                        inner_deep_model,
-                        bundle,
-                        inner_val_subject_arr,
-                        device,
-                        model_name=model_name,
-                        raise_on_missing=True,
-                    )
-                    if deep_oof_train is not None:
-                        for i, sid in enumerate(inner_val_subjects):
-                            pos = int(
-                                np.where(outer_train_arr == str(sid))[0][0]
-                            )
-                            # Use mean of deep features as scalar OOF score.
-                            deep_oof_train[pos] = float(
-                                np.mean(inner_deep_feats[i])
-                            )
-                        deep_feat_dim = inner_deep_feats.shape[1]
+                    for i, sid in enumerate(inner_val_subjects):
+                        pos = int(np.where(outer_train_arr == str(sid))[0][0])
+                        deep_oof_train[pos] = float(
+                            inner_deep_probs[str(sid)]
+                        )
 
-            # Train meta-classifier on inner OOF predictions (train subjects only).
+            # Train meta-classifier on inner OOF probabilities (train subjects only).
             if deep_oof_train is not None:
                 meta_X = np.stack([xgb_oof_train, deep_oof_train], axis=1)
             else:
@@ -1043,6 +1169,13 @@ def run_prediction_ensemble(
                 max_iter=3000, class_weight="balanced", random_state=seed
             )
             meta.fit(meta_X, meta_y)
+
+            # Tune threshold on inner-val-equivalent: use OOF predictions themselves
+            # as a proxy (they are out-of-sample for each subject).
+            oof_meta_prob = meta.predict_proba(meta_X)[:, 1]
+            fold_thresholds[outer_fold] = float(
+                _cla_youden(meta_y, oof_meta_prob)
+            )
 
             # Retrain base models on full outer training participants.
             outer_tr_index = np.flatnonzero(
@@ -1084,24 +1217,28 @@ def run_prediction_ensemble(
                 xgb_test_prob, bundle.subject_ids[outer_test_index]
             )
 
-            deep_test_feats = None
+            deep_test_probs = None
             if deep_full is not None:
                 outer_test_subject_arr = np.asarray(outer_test, dtype=object)
-                deep_test_feats = _deep_features(
+                deep_test_arr = _deep_predict_proba(
                     deep_full,
                     bundle,
                     outer_test_subject_arr,
                     device,
+                    batch_size=32,
                     model_name=model_name,
-                    raise_on_missing=True,
                 )
+                deep_test_probs = {
+                    str(s): float(p)
+                    for s, p in zip(outer_test, deep_test_arr)
+                }
 
-            # Apply meta-classifier to outer test predictions.
+            # Apply meta-classifier to outer test probabilities.
             for i, sid in enumerate(outer_test):
                 sid_str = str(sid)
                 x_p = float(xgb_test_subject_probs.get(sid_str, 0.5))
-                if deep_test_feats is not None:
-                    d_p = float(np.mean(deep_test_feats[i]))
+                if deep_test_probs is not None:
+                    d_p = float(deep_test_probs[sid_str])
                     meta_pred = float(
                         meta.predict_proba([[x_p, d_p]])[:, 1][0]
                     )
@@ -1111,10 +1248,17 @@ def run_prediction_ensemble(
                 combined[idx] = meta_pred
                 a_fold_of[idx] = outer_fold
 
-        y_pred = (combined >= 0.5).astype(int)
+        y_pred = np.asarray(
+            [
+                int(combined[index_of[str(s)]] >= fold_thresholds[a_fold_of[index_of[str(s)]]])
+                for s in subject_list
+            ],
+            dtype=int,
+        )
 
     else:
         raise ValueError(f"Unknown ensemble method: {method}")
+
 
     metrics = binary_metrics(
         subject_labels_arr, combined, y_pred=y_pred, n_boot=2000, seed=seed

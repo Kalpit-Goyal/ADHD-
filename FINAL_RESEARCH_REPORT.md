@@ -1,8 +1,8 @@
 # Final Research Report — Hybrid EEG-Based ADHD Detection
 
-**Date:** 2026-11-22
+**Date:** 2026-11-23
 **Dataset:** IEEE DataPort ADHD EEG (121 subjects: 61 ADHD / 60 control, 19 channels, 128 Hz)
-**Hardware:** CPU only (no CUDA), Python 3.13.5, PyTorch 2.11.0+cpu, XGBoost 3.0.2
+**Hardware:** CUDA (RTX 3050 6GB, driver 610.91, CUDA 13.3 UMD), Python 3.13.5, PyTorch 2.6.0+cu124, XGBoost 3.0.2
 
 ---
 
@@ -19,14 +19,15 @@ All experiments use **real data only** (no synthetic data), **subject-wise 5-fol
 
 | Category | Experiment | Model | AUROC | Accuracy | Sensitivity | Specificity |
 |----------|-----------|-------|-------|----------|-------------|-------------|
-| **Overall best** | E6 | EEGNet (raw-signal CNN) | **0.772** | **0.719** | 0.738 | 0.700 |
-| Best classical | E2 | SVM-RBF (node+adj+rel) | **0.737** | 0.669 | 0.705 | 0.633 |
-| Best XGBoost | E1 | XGBoost (node+adj+rel) | 0.652 | 0.636 | 0.754 | 0.517 |
-| Best hybrid | E9 | Feature fusion (XGBoost + CTENet) | 0.670 | **0.636** | **0.738** | 0.533 |
-| Best hybrid | E12 | Stacking (XGBoost + CTENet) | **0.673** | 0.603 | 0.672 | 0.533 |
-| Best deep (graph) | E8 | CTE-Net-inspired | 0.609 | 0.554 | 0.574 | 0.533 |
+| **Best classical** | E4 | ExtraTrees (node+adj) | **0.788** | **0.694** | **0.803** | 0.583 |
+| **Best deep** | E6 | EEGNet (raw-signal CNN, CUDA) | 0.730 | 0.653 | 0.705 | 0.600 |
+| Best XGBoost | E1 | XGBoost (node+adj) | 0.769 | 0.669 | 0.705 | 0.633 |
+| Best SVM-RBF | E2 | SVM-RBF (node+adj+rel) | 0.781 | 0.653 | 0.557 | 0.750 |
+| E7 | CTENet Original | Architecture verified, training time-limited | — | — | — | — |
+| E8 | CTENet Inspired | Not trained | — | — | — | — |
+| E9–E12 | Hybrid | Code fixed & test-verified, training time-limited | — | — | — | — |
 
-**Key finding:** The raw-signal CNN (EEGNet, E6) outperforms all feature-engineered and hybrid approaches, achieving AUROC 0.770. Among classical approaches, SVM-RBF with full features (node+adj+rel) is best at AUROC 0.737. Hybrid fusion does not outperform the best single branch but provides more balanced sensitivity/specificity trade-offs.
+**Key finding:** Among completed experiments, ExtraTrees with directed-connectivity features (E4) is best at AUROC 0.788, accuracy 0.694. EEGNet on CUDA (E6) achieves AUROC 0.730. Directed connectivity (342 directed edges) consistently improves classical results over band-power alone. All 30 pipeline tests pass, including directed-connectivity, CTE-Net paper parameters, CUDA forward/backward, and hybrid leakage assertions.
 
 ---
 

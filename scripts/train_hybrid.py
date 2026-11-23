@@ -9,6 +9,9 @@ Experiments:
 All experiments use identical subject-wise folds. Deep model is trained
 per fold on training subjects only, with validation for early stopping.
 No test-set information is used for weighting or threshold tuning.
+
+The deep branch is required by default. Use --skip-deep for explicitly
+labelled classical-only ablations.
 """
 
 from __future__ import annotations
@@ -112,12 +115,24 @@ def make_deep_model_factory(
         config.model.name = model_name
         model = build_deep_model(
             config.model,
-            n_channels=19,
-            n_features=6,
-            n_times=640,
+            n_channels=bundle_n_channels(config),
+            n_features=bundle_n_features(config),
+            n_times=bundle_n_times(config),
         )
         return model.to(device)
     return factory
+
+
+def bundle_n_channels(config) -> int:
+    return int(getattr(config.data, "n_channels", 19))
+
+
+def bundle_n_features(config) -> int:
+    return int(getattr(config.data, "n_features", 6))
+
+
+def bundle_n_times(config) -> int:
+    return int(getattr(config.data, "n_times", 640))
 
 
 def collect_branch_a_probs(
@@ -187,12 +202,15 @@ def main() -> None:
     parser.add_argument("--deep-epochs", type=int, default=30)
     parser.add_argument("--deep-batch", type=int, default=32)
     parser.add_argument("--deep-lr", type=float, default=1e-3)
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument(
+        "--device", default="cuda", choices=["auto", "cpu", "cuda"],
+        help="Device for deep models. 'cuda' is required; CPU fallback is prohibited.",
+    )
     parser.add_argument(
         "--official-folds", default=None, help="Path to official CTE-Net folds JSON"
     )
     parser.add_argument(
-        "--skip-deep", action="store_true", help="Run classical-only experiments"
+        "--skip-deep", action="store_true", help="Run classical-only ablations (not saved as E9-E12)"
     )
     args = parser.parse_args()
 
@@ -211,6 +229,10 @@ def main() -> None:
         f"{len(bundle.labels)} epochs"
     )
 
+    # Verify real data, not synthetic.
+    if str(config.data.root).endswith("synthetic"):
+        raise ValueError("Refusing to run hybrid experiments on synthetic data")
+
     labels = read_subject_labels(Path(config.data.root) / config.data.manifest)
     folds = build_folds(labels, n_splits=args.folds, seed=args.seed, official_folds_path=args.official_folds)
     print(f"Using {len(folds)} subject-wise folds")
@@ -223,6 +245,8 @@ def main() -> None:
 
     device = resolve_device(args.device)
 
+    print(f"Device: {device} | CUDA available: {torch.cuda.is_available()}")
+
     # ----- Branch A: XGBoost OOF probabilities per fold -----
     print("\n=== Branch A (XGBoost) OOF predictions ===")
     branch_a_probs = collect_branch_a_probs(bundle, folds, args.seed)
@@ -231,138 +255,121 @@ def main() -> None:
     branch_b_probs: Optional[dict[int, dict[str, float]]] = None
     deep_model_factory: Optional[Callable[[], torch.nn.Module]] = None
 
-    if not args.skip_deep:
-        print("\n=== Training deep model per fold (CTE-Net inspired) ===")
-        try:
-            deep_model_factory = make_deep_model_factory(config, device, "cte_net")
+    if args.skip_deep:
+        print("\n=== SKIP-DEEP: Classical-only ablation (not E9-E12) ===")
+    else:
+        print("\n=== Training deep model per fold ===")
+        deep_model_factory = make_deep_model_factory(config, device, "cte_net")
 
-            # Train deep model per fold using the SAME folds as the hybrid pipeline.
-            branch_b_probs = {}
-            deep_thresholds: dict[int, float] = {}
+        # Train deep model per fold using the SAME folds as the hybrid pipeline.
+        branch_b_probs = {}
+        deep_thresholds: dict[int, float] = {}
 
-            for fold, fold_spec in enumerate(folds):
-                train_subjects = list(fold_spec.train)
-                val_subjects = list(fold_spec.val)
-                test_subjects = list(fold_spec.test)
+        for fold, fold_spec in enumerate(folds):
+            train_subjects = list(fold_spec.train)
+            val_subjects = list(fold_spec.val)
+            test_subjects = list(fold_spec.test)
 
-                fold_probs, threshold = train_deep_model_per_fold(
-                    bundle,
-                    train_subjects,
-                    val_subjects,
-                    test_subjects,
-                    config,
-                    device,
-                    "cte_net",
-                    args.seed,
-                    fold,
-                )
-                branch_b_probs[fold] = fold_probs
-                deep_thresholds[fold] = threshold
+            fold_probs, threshold = train_deep_model_per_fold(
+                bundle,
+                train_subjects,
+                val_subjects,
+                test_subjects,
+                config,
+                device,
+                "cte_net",
+                args.seed,
+                fold,
+            )
+            branch_b_probs[fold] = fold_probs
+            deep_thresholds[fold] = threshold
 
-                print(
-                    f"  Fold {fold+1}/{len(folds)}: "
-                    f"train {len(train_subjects)} | "
-                    f"val {len(val_subjects)} | "
-                    f"test {len(test_subjects)} | "
-                    f"threshold {threshold:.3f}"
-                )
+            print(
+                f"  Fold {fold+1}/{len(folds)}: "
+                f"train {len(train_subjects)} | "
+                f"val {len(val_subjects)} | "
+                f"test {len(test_subjects)} | "
+                f"threshold {threshold:.3f}"
+            )
 
-            print(f"  Collected deep OOF probs for {len(branch_b_probs)} folds")
-        except Exception as exc:
-            print(f"  Deep model training failed: {exc}")
-            branch_b_probs = None
-            deep_model_factory = None
+        print(f"  Collected deep OOF probs for {len(branch_b_probs)} folds")
 
     # ----- E9: Feature-level fusion -----
     print("\n=== E9: Feature-level fusion ===")
-    try:
-        fusion_result = run_feature_fusion(
-            bundle,
-            folds,
-            args.seed,
-            deep_model_factory=deep_model_factory,
-            deep_config=None,
-            device=device,
-            model_name="cte_net",
-            real_data=True,
-        )
-        save_hybrid_result(fusion_result, output_dir / "models")
-        print(
-            f"  E9 feature_fusion: AUROC {fusion_result.roc_auc:.3f} | "
-            f"accuracy {fusion_result.accuracy:.3f} | "
-            f"sens {fusion_result.sensitivity:.3f} | spec {fusion_result.specificity:.3f}"
-        )
-    except Exception as exc:
-        print(f"  E9 FAILED: {exc}")
-        fusion_result = None
+    fusion_result = run_feature_fusion(
+        bundle,
+        folds,
+        args.seed,
+        deep_model_factory=deep_model_factory,
+        deep_config=None,
+        device=device,
+        model_name="cte_net",
+        real_data=True,
+    )
+    save_hybrid_result(fusion_result, output_dir / "models")
+    print(
+        f"  E9 feature_fusion: AUROC {fusion_result.roc_auc:.3f} | "
+        f"accuracy {fusion_result.accuracy:.3f} | "
+        f"sens {fusion_result.sensitivity:.3f} | spec {fusion_result.specificity:.3f}"
+    )
 
     # ----- E10: Soft voting -----
     print("\n=== E10: Soft voting ensemble ===")
-    try:
-        soft_result = run_prediction_ensemble(
-            bundle, folds, args.seed,
-            branch_a_probs=branch_a_probs,
-            branch_b_probs=branch_b_probs,
-            method="soft_voting",
-            real_data=True,
-        )
-        save_hybrid_result(soft_result, output_dir / "models")
-        print(
-            f"  E10 soft_voting: AUROC {soft_result.roc_auc:.3f} | "
-            f"accuracy {soft_result.accuracy:.3f} | "
-            f"sens {soft_result.sensitivity:.3f} | spec {soft_result.specificity:.3f}"
-        )
-    except Exception as exc:
-        print(f"  E10 FAILED: {exc}")
-        soft_result = None
+    soft_result = run_prediction_ensemble(
+        bundle, folds, args.seed,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="soft_voting",
+        real_data=True,
+        deep_model_factory=deep_model_factory,
+        device=device,
+        model_name="cte_net",
+    )
+    save_hybrid_result(soft_result, output_dir / "models")
+    print(
+        f"  E10 soft_voting: AUROC {soft_result.roc_auc:.3f} | "
+        f"accuracy {soft_result.accuracy:.3f} | "
+        f"sens {soft_result.sensitivity:.3f} | spec {soft_result.specificity:.3f}"
+    )
 
     # ----- E11: Weighted soft voting -----
     print("\n=== E11: Weighted soft voting ensemble ===")
-    try:
-        # Weights are derived inside run_prediction_ensemble from OOF AUROC.
-        weighted_result = run_prediction_ensemble(
-            bundle, folds, args.seed,
-            branch_a_probs=branch_a_probs,
-            branch_b_probs=branch_b_probs,
-            method="weighted_voting",
-            weights=None,
-            deep_model_factory=deep_model_factory,
-            device=device,
-            model_name="cte_net",
-            real_data=True,
-        )
-        save_hybrid_result(weighted_result, output_dir / "models")
-        print(
-            f"  E11 weighted_voting: AUROC {weighted_result.roc_auc:.3f} | "
-            f"accuracy {weighted_result.accuracy:.3f} | "
-            f"sens {weighted_result.sensitivity:.3f} | spec {weighted_result.specificity:.3f}"
-        )
-    except Exception as exc:
-        print(f"  E11 FAILED: {exc}")
-        weighted_result = None
+    weighted_result = run_prediction_ensemble(
+        bundle, folds, args.seed,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="weighted_voting",
+        weights=None,
+        real_data=True,
+        deep_model_factory=deep_model_factory,
+        device=device,
+        model_name="cte_net",
+    )
+    save_hybrid_result(weighted_result, output_dir / "models")
+    print(
+        f"  E11 weighted_voting: AUROC {weighted_result.roc_auc:.3f} | "
+        f"accuracy {weighted_result.accuracy:.3f} | "
+        f"sens {weighted_result.sensitivity:.3f} | spec {weighted_result.specificity:.3f}"
+    )
 
     # ----- E12: Stacking (proper nested CV) -----
     print("\n=== E12: Stacking ensemble ===")
-    try:
-        stacking_result = run_prediction_ensemble(
-            bundle, folds, args.seed,
-            branch_a_probs=branch_a_probs,
-            branch_b_probs=branch_b_probs,
-            method="stacking",
-            real_data=True,
-            deep_model_factory=deep_model_factory,
-            device=device,
-            model_name="cte_net",
-        )
-        save_hybrid_result(stacking_result, output_dir / "models")
-        print(
-            f"  E12 stacking: AUROC {stacking_result.roc_auc:.3f} | "
-            f"accuracy {stacking_result.accuracy:.3f} | "
-            f"sens {stacking_result.sensitivity:.3f} | spec {stacking_result.specificity:.3f}"
-        )
-    except Exception as exc:
-        print(f"  E12 FAILED: {exc}")
-        stacking_result = None
+    stacking_result = run_prediction_ensemble(
+        bundle, folds, args.seed,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="stacking",
+        real_data=True,
+        deep_model_factory=deep_model_factory,
+        device=device,
+        model_name="cte_net",
+    )
+    save_hybrid_result(stacking_result, output_dir / "models")
+    print(
+        f"  E12 stacking: AUROC {stacking_result.roc_auc:.3f} | "
+        f"accuracy {stacking_result.accuracy:.3f} | "
+        f"sens {stacking_result.sensitivity:.3f} | spec {stacking_result.specificity:.3f}"
+    )
 
     # ----- Summary -----
     rows = []

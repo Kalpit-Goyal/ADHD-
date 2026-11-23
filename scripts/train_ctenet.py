@@ -60,7 +60,8 @@ def main() -> None:
         "--official-folds", default=None, help="Path to official CTE-Net folds JSON"
     )
     parser.add_argument(
-        "--device", default="auto", choices=["auto", "cpu", "cuda"]
+        "--device", default="cuda", choices=["auto", "cpu", "cuda"],
+        help="Device for deep models. 'cuda' is required; CPU fallback is prohibited.",
     )
     args = parser.parse_args()
 

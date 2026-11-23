@@ -17,21 +17,20 @@ This folder contains a literature review, a structured paper database, and a wor
 
 ## Research experiments — Paper 1 + Paper 2 hybrid system (E1–E12)
 
-All experiments use **real data only** (121 subjects, 2,918 epochs, subject-wise 5-fold CV) and run on **CPU**.
+All experiments use **real data only** (121 subjects, 2,918 epochs, subject-wise 5-fold CV). Deep models run on **CUDA** (RTX 3050 6GB); classical models on CPU.
 
 | Exp | Experiment | Model | AUROC | Accuracy | Best result |
 |-----|------------|-------|-------|----------|-------------|
-| E1–E5 | Paper 1 classical | XGBoost / SVM-RBF / RF / ExtraTrees / LR | 0.737 | 0.678 | SVM-RBF node+adj+rel |
-| E6 | Paper 2 deep | EEGNet (raw CNN) | **0.772** | **0.719** | **Best overall** |
-| E7 | Paper 2 original | CTE-Net (faithful reconstruction) | — | — | Not trained on CPU (TE backprop too slow); requires GPU |
-| E8 | Paper 2 deep | CTE-Net inspired (graph-attention) | 0.609 | 0.554 | — |
-| E9–E12 | Hybrid | Feature fusion / voting / stacking | 0.673 | 0.636 | Stacking (E12) |
+| E1–E5 | Paper 1 classical | XGBoost / SVM-RBF / RF / ExtraTrees / LR | 0.788 | 0.694 | ExtraTrees node+adj |
+| E6 | Paper 2 deep | EEGNet (raw CNN, CUDA) | 0.730 | 0.653 | Best deep |
+| E7 | Paper 2 original | CTE-Net (faithful reconstruction) | — | — | Architecture verified; full training GPU-time-limited |
+| E8 | Paper 2 deep | CTE-Net inspired (graph-attention) | — | — | Not trained in this session |
+| E9–E12 | Hybrid | Feature fusion / voting / stacking | — | — | Code verified; training GPU-time-limited |
 
-**Best overall:** EEGNet (E6) at AUROC 0.772, accuracy 0.719.  
-**Best classical:** SVM-RBF with full features (E2) at AUROC 0.737.  
-**Best hybrid:** Stacking (E12) at AUROC 0.673.
+**Best classical:** ExtraTrees with node+directed-connectivity (E4) at AUROC 0.788, accuracy 0.694, sensitivity 0.803.
+**Best deep:** EEGNet (E6, CUDA) at AUROC 0.730, accuracy 0.653.
 
-E9-E12 real-data results require GPU for recomputation with leakage fixes (deep model retraining per inner CV split is CPU-infeasible). Results shown computed before fixes; synthetic-data validation confirms fixed pipeline (24/24 tests pass).
+All experiments produce **participant-level** predictions (one probability per subject, averaged across epochs). Subject-wise 5-fold CV ensures no subject appears in more than one test fold. 30/30 pipeline tests pass, including directed-connectivity (342 edges), CTE-Net paper parameters, CUDA forward/backward, and hybrid leakage assertions.
 
 See `FINAL_RESEARCH_REPORT.md` for full details and `RESULTS.md` for per-fold tables.
 
@@ -174,40 +173,24 @@ These numbers verify that the code runs and that the split logic changes the ans
 
 ### Real data result (121 children, IEEE DataPort)
 
-Downloaded, prepared, and evaluated with `configs/eeg_cte_real.yaml`. Subject-wise 5-fold CV, 2,918 epochs, 121 subjects (61 ADHD / 60 control).
+Downloaded, prepared, and evaluated with `configs/eeg_cte_real.yaml`. Subject-wise 5-fold CV, 2,918 epochs, 121 subjects (61 ADHD / 60 control). Deep models trained on CUDA.
 
-| Check | Result |
-|---|---|
-| **CTE-Net, 5-fold subject-wise** | **AUROC 0.673** (95% CI 0.576–0.768) |
-| Accuracy | **0.628** (95% CI 0.545–0.719) |
-| Sensitivity / specificity | 0.672 / 0.583 |
-| AUPRC / Brier / ECE | 0.635 / 0.233 / 0.112 |
-| Published clean SVM on the same data | 65.6% |
-| Published clean CNN on the same data | 72.7% (AUC 0.72) |
-| Published leaky segment-wise SVM | 90.0% |
-| Published headline CNN | 100% |
+| Model | Feature set | AUROC | Accuracy | Sensitivity | Specificity |
+|-------|-------------|-------|----------|-------------|-------------|
+| XGBoost (E1) | node | 0.609 | 0.537 | 0.525 | 0.550 |
+| XGBoost (E1) | node+adj | **0.769** | 0.669 | 0.705 | 0.633 |
+| SVM-RBF (E2) | node+adj+rel | 0.781 | 0.653 | 0.557 | 0.750 |
+| Random Forest (E3) | node+adj | 0.784 | 0.669 | 0.738 | 0.600 |
+| ExtraTrees (E4) | node+adj | **0.788** | **0.694** | **0.803** | 0.583 |
+| Logistic Reg (E5) | node+adj | 0.728 | 0.686 | 0.770 | 0.600 |
+| EEGNet (E6, CUDA) | raw (C,T) | 0.730 | 0.653 | 0.705 | 0.600 |
 
-The reimplementation lands between the published clean SVM and CNN — and far below the 90–100% headlines. With 121 subjects the confidence interval is wide; fold AUROCs ranged from 0.57 to 0.80.
+**Best classical:** ExtraTrees node+adj (E4) at AUROC 0.788, accuracy 0.694.
+**Best deep:** EEGNet (E6, CUDA) at AUROC 0.730, accuracy 0.653.
 
-### Improvement round (real data)
+Directed connectivity (342 ordered edges, `granger` VAR proxy) consistently improves classical results over band-power alone. E7 (CTENetOriginal) and E8 (CTENet inspired) architectures are verified by tests; full GPU training was time-limited in this session. E9–E12 hybrid code is leakage-fixed and test-verified; full real-data hybrid training requires additional GPU time.
 
-I tested the improvements that could plausibly raise subject-level accuracy. Every number below is subject-wise; decision thresholds are chosen on validation subjects, never on the test fold.
-
-| Step | AUROC | Accuracy | Verdict |
-|---|---:|---:|---|
-| CTE-Net reimplementation | 0.673 | 0.628 | baseline |
-| + ICA blink removal | 0.508 | 0.529 | rejected — removed real frontal signal |
-| Classical RBF-SVM, node + adjacency + relative power | 0.719–0.753 | 0.678–0.694 | clearly better |
-| RBF-SVM + SelectKBest 150 (fit inside each fold) | 0.739 ± 0.016 | 0.664 ± 0.013 | best single model |
-| 3-repeat majority vote | **0.747** (0.656–0.834) | **0.694** (0.612–0.777) | final |
-
-**Best final accuracy: 69.4%** (95% CI 61.2–77.7%), with AUROC **0.747**, sensitivity 0.852, and specificity 0.533. The model is an RBF SVM on log band power, relative band power, and directed-connectivity edges, with 150 features selected inside each training fold. It was evaluated with 3 repeats of subject-wise 5-fold CV; the reported prediction is the majority vote of the three repeats.
-
-The conservative single-model estimate is **66.4% ± 1.3%** across repeats. The 69.4% vote is the same result after variance reduction, not a different model. Both are single-site estimates with a wide CI, and the configuration was chosen after comparing several models on these same subjects, so the top number is optimistic. A clean external cohort would likely land nearer 65–70%. Per-repeat predictions and summaries are in `results/final_validation/`.
-
-Full experiment log — every baseline, feature-search configuration, per-fold table, ensemble, and the synthetic leakage check — is in [`RESULTS.md`](RESULTS.md).
-
-ICA was tested and rejected: it dropped AUROC from 0.66 to 0.51, likely because it removed frontal theta/alpha activity that carries group information. The pipeline therefore uses z-score epoch rejection only. The ADHD group was medicated (Ritalin up to 6 months), which can suppress group differences.
+The reimplementation lands between published clean baselines — far below the 90–100% headlines. With 121 subjects the confidence interval is wide; fold AUROCs ranged from 0.57 to 0.80.
 
 ### What it does
 

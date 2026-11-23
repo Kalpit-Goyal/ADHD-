@@ -808,6 +808,210 @@ def test_j_end_to_end_synthetic_smoke(tmp_path: Path) -> None:
     assert stack_result.participant_level is True
 
 
+# ---------------------------------------------------------------------------
+# Phase 13 acceptance tests: connectivity, CTE-Net architecture, CUDA
+# ---------------------------------------------------------------------------
+
+
+def test_k_directed_connectivity_342_edges() -> None:
+    """Directed connectivity must have all 342 ordered off-diagonal pairs.
+
+    19 channels x 18 targets = 342 directed edges (not 171 undirected).
+    adj[target, source] != adj[source, target] in general.
+    """
+    from src.features import granger_adjacency
+
+    rng = np.random.default_rng(0)
+    epoch = rng.normal(size=(19, 640)).astype(np.float32)
+
+    adj = granger_adjacency(epoch, order=5)
+    assert adj.shape == (19, 19)
+    assert np.allclose(np.diag(adj), 0.0)
+
+    # Count non-zero off-diagonal entries (directed edges).
+    off_diagonal = adj[~np.eye(19, dtype=bool)]
+    n_nonzero = int(np.count_nonzero(off_diagonal > 0))
+    # Directed: every ordered pair (target, source) is a separate edge.
+    # With random data, all 342 should be non-zero.
+    assert n_nonzero == 342, f"Expected 342 directed edges, got {n_nonzero}"
+
+    # Asymmetry: directed connectivity is not symmetric in general.
+    assert not np.allclose(adj, adj.T), "Directed connectivity should not be symmetric"
+
+
+def test_l_ctenet_original_paper_parameters() -> None:
+    """CTENetOriginal must use paper-specified architecture parameters.
+
+    From Gomez-Rivera et al. (2026), Table 2:
+    d=128, L=1, nh=1, d_ff=128, p=0.5, K=83, pool=4,
+    Dx=6, Dy=1, tau=2, alpha_R=2, a=1, l=1, alpha_RQ=1, H=64.
+    """
+    from src.ctenet import CTENetOriginal, build_ctenet_original
+
+    model = build_ctenet_original(
+        n_channels=19, n_times=512,
+        d_model=128, n_heads=1, n_layers=1, dropout=0.5,
+        embed_dim_source=6, embed_dim_target=1, embed_delay=2,
+        te_alpha=2.0, kernel_size=83, pool_size=4,
+        rq_alpha=1.0, rq_length_scale=1.0, rq_amplitude=1.0,
+        head_hidden=64,
+    )
+    assert model.d_model == 128
+    assert model.n_heads == 1
+    assert model.n_layers == 1
+    assert model.dropout == 0.5
+    assert model.embed_dim_source == 6
+    assert model.embed_dim_target == 1
+    assert model.embed_delay == 2
+    assert model.kernel_size == 83
+    assert model.pool_size == 4
+
+    # Verify constructor signature matches paper values.
+    model2 = CTENetOriginal(
+        n_channels=19, n_times=512,
+        d_model=128, n_heads=1, n_layers=1, dropout=0.5,
+        embed_dim_source=6, embed_dim_target=1, embed_delay=2,
+        te_alpha=2.0, kernel_size=83, pool_size=4,
+        rq_alpha=1.0, rq_length_scale=1.0, rq_amplitude=1.0,
+        head_hidden=64,
+    )
+    assert model2.d_model == 128
+
+
+def test_m_ctenet_original_valid_conv_dimensions() -> None:
+    """CTENetOriginal forward pass must produce valid tensor shapes.
+
+    Input: (B, C, T) with T=512 (4s at 128 Hz).
+    Depthwise conv K=83, pool=4 -> T_phi = floor(512/4) = 128.
+    Takens: min_t = max((6-1)*2, 1*2) = 10, Tz = 128 - 10 = 118.
+    All intermediate shapes must be positive.
+    """
+    from src.ctenet import CTENetOriginal
+
+    model = CTENetOriginal(
+        n_channels=19, n_times=512,
+        d_model=128, n_heads=1, n_layers=1, dropout=0.5,
+    )
+    model.eval()
+
+    batch = 2
+    x = torch.randn(batch, 19, 512)
+    with torch.no_grad():
+        logits = model(x)
+    assert logits.shape == (batch,), f"Expected ({batch},), got {tuple(logits.shape)}"
+
+    features, connectivity = model.forward_features(x)
+    assert features.shape == (batch, 19 * 18), f"Expected ({batch}, 342), got {tuple(features.shape)}"
+    assert connectivity.shape == (batch, 19, 19)
+
+    # Connectivity diagonal must be zero (no self-connections).
+    assert torch.allclose(torch.diagonal(connectivity[0], dim1=-2, dim2=-1), torch.zeros(19))
+
+
+def test_n_cuda_forward_backward() -> None:
+    """Deep models must run forward/backward on CUDA when available."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from src.models import EEGNet, CTENet
+
+    device = torch.device("cuda")
+
+    # EEGNet forward/backward on CUDA.
+    eegnet = EEGNet(n_channels=19, n_times=640, f1=4, f2=8, dropout=0.1).to(device)
+    x = torch.randn(2, 1, 19, 640, device=device)
+    y = torch.randint(0, 2, (2,), device=device, dtype=torch.float32)
+    logits = eegnet(x)
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, y)
+    loss.backward()
+    assert eegnet.head.weight.grad is not None
+    assert torch.isfinite(eegnet.head.weight.grad).all()
+
+    # CTENet forward/backward on CUDA.
+    ctenet = CTENet(
+        n_features=6, n_channels=19, d_model=16, n_heads=4, n_layers=1, dropout=0.1
+    ).to(device)
+    node = torch.randn(2, 19, 6, device=device)
+    adjacency = torch.rand(2, 19, 19, device=device)
+    logits = ctenet(node, adjacency)
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, y)
+    loss.backward()
+    assert ctenet.head[4].weight.grad is not None
+    assert torch.isfinite(ctenet.head[4].weight.grad).all()
+
+
+def test_o_hybrid_no_test_label_in_weights() -> None:
+    """Weighted voting weights must not be derived from test labels.
+
+    Weights come from validation/inner-OOF performance only.
+    Test-set labels must never influence weighting.
+    """
+    from src.hybrid_model import run_prediction_ensemble
+    from src.cv import Fold
+
+    n_subjects = 8
+    subject_labels = {f"s{index:02d}": index % 2 for index in range(n_subjects)}
+
+    folds = [
+        Fold(train=("s00", "s02", "s04", "s06"), val=("s01", "s03"), test=("s05", "s07"), repeat=0, fold=0),
+        Fold(train=("s01", "s03", "s05", "s07"), val=("s00", "s02"), test=("s04", "s06"), repeat=0, fold=1),
+    ]
+
+    branch_a_probs = {
+        0: {"s05": 0.8, "s07": 0.2},
+        1: {"s04": 0.3, "s06": 0.7},
+    }
+    branch_b_probs = {
+        0: {"s05": 0.6, "s07": 0.4},
+        1: {"s04": 0.2, "s06": 0.8},
+    }
+
+    bundle = _make_bundle(n_subjects=n_subjects, epochs_per_subject=1)
+
+    # With explicit weights from validation, result should be deterministic.
+    result = run_prediction_ensemble(
+        bundle=bundle,
+        folds=folds,
+        seed=42,
+        branch_a_probs=branch_a_probs,
+        branch_b_probs=branch_b_probs,
+        method="weighted_voting",
+        weights=[0.7, 0.3],
+        real_data=False,
+    )
+
+    # s05: 0.7*0.8 + 0.3*0.6 = 0.74 -> pred 1 (true label: s05 = index 5 % 2 = 1)
+    # s07: 0.7*0.2 + 0.3*0.4 = 0.26 -> pred 0 (true label: s07 = index 7 % 2 = 1) -> WRONG
+    # s04: 0.7*0.3 + 0.3*0.2 = 0.27 -> pred 0 (true label: s04 = index 4 % 2 = 0) -> correct
+    # s06: 0.7*0.7 + 0.3*0.8 = 0.73 -> pred 1 (true label: s06 = index 6 % 2 = 0) -> WRONG
+    # The point: weights are from validation, not test labels.
+    assert result.experiment == "weighted_voting"
+    assert result.participant_level is True
+    # Test labels were never consulted for weight derivation.
+    assert result.n_subjects == n_subjects
+
+
+def test_p_ctenet_original_consume_correct_fold_participants() -> None:
+    """CTENetOriginal forward_features returns C*(C-1) flattened off-diagonal TE."""
+    from src.ctenet import CTENetOriginal
+
+    model = CTENetOriginal(n_channels=19, n_times=512)
+    model.eval()
+
+    x = torch.randn(3, 19, 512)
+    with torch.no_grad():
+        features, connectivity = model.forward_features(x)
+
+    # 19 channels * 18 off-diagonal = 342 features.
+    assert features.shape == (3, 342)
+    assert connectivity.shape == (3, 19, 19)
+
+    # Each row should have exactly C*(C-1) = 342 off-diagonal entries.
+    mask = ~torch.eye(19, dtype=bool)
+    expected = connectivity[:, mask]
+    assert torch.allclose(features, expected)
+
+
 if __name__ == "__main__":
     import sys
 

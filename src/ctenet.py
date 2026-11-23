@@ -353,6 +353,9 @@ class CTENetOriginal(nn.Module):
         self.rq_alpha = rq_alpha
         self.rq_length_scale = rq_length_scale
         self.rq_amplitude = rq_amplitude
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.dropout = dropout
 
         # ------------------------------------------------------------------
         # Block 1: Transformer-based contextualization

@@ -168,6 +168,17 @@ def _subject_probs(
     return frame.groupby("subject_id", sort=False)["probability"].mean()
 
 
+def _directed_edge_indices(n_channels: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return all ordered off-diagonal pairs (target, source) for directed connectivity.
+
+    For C channels there are C*(C-1) directed edges (upper AND lower triangle).
+    adjacency[target, source] encodes the influence from source to target.
+    """
+    rows, columns = np.meshgrid(np.arange(n_channels), np.arange(n_channels), indexing="ij")
+    mask = rows != columns
+    return rows[mask], columns[mask]
+
+
 def _build_epoch_features(bundle, feature_set: str) -> np.ndarray:
     n = len(bundle.labels)
     node = bundle.node_features.reshape(n, -1)
@@ -176,7 +187,7 @@ def _build_epoch_features(bundle, feature_set: str) -> np.ndarray:
     relative = probabilities / probabilities.sum(axis=2, keepdims=True)
     relative = relative.reshape(n, -1)
 
-    rows, columns = np.triu_indices(bundle.n_channels, k=1)
+    rows, columns = _directed_edge_indices(bundle.n_channels)
     edges = bundle.adjacency[:, rows, columns]
 
     if feature_set == "node":
@@ -194,9 +205,9 @@ def _make_feature_names(n_channels: int, bands: list[str]) -> list[str]:
         for band in bands:
             names.append(f"{channel} | {band} power")
         names.append(f"{channel} | theta/beta ratio")
-    rows, columns = np.triu_indices(n_channels, k=1)
-    for target, source in zip(rows, columns):
-        names.append(f"{CHANNELS[target]} <-> {CHANNELS[source]} connectivity")
+    rows, columns = _directed_edge_indices(n_channels)
+    for target, source in zip(rows.tolist(), columns.tolist()):
+        names.append(f"{CHANNELS[target]} <- {CHANNELS[source]} connectivity")
     for channel in CHANNELS[:n_channels]:
         for band in bands:
             names.append(f"{channel} | {band} relative power")

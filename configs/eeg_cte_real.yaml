@@ -23,11 +23,11 @@ features:
     gamma: [30.0, 45.0]
 
 model:
-  name: cte_net
-  d_model: 64
-  n_heads: 4
-  n_layers: 2
-  dropout: 0.25
+  name: ctenet_original
+  d_model: 128
+  n_heads: 1
+  n_layers: 1
+  dropout: 0.5
   eegnet_f1: 8
   eegnet_d: 2
   eegnet_f2: 16
@@ -43,7 +43,7 @@ training:
   weight_decay: 0.0001
   seed: 42
   num_workers: 0
-  device: auto
+  device: cuda
 
 output:
   dir: results/cte_net_real

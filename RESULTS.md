@@ -10,7 +10,7 @@ All numbers below are our own runs, produced by this repository. The deployed mo
 | **Epochs kept after z-score rejection** | 2,918 |
 | **Evaluation** | Subject-wise 5-fold CV, 3 repeats; per-fold Youden threshold chosen on validation subjects only |
 | **Reference method** | CTE-Net, Gomez-Rivera et al., *Sensors* 2026 — [10.3390/s26185786](https://doi.org/10.3390/s26185786) |
-| **Run date** | Trained 2026-11-15 |
+| **Run date** | Trained 2026-11-23 |
 
 > Research prototype. Single site, wide confidence intervals, and model selection was done on these same 121 subjects. **Not a diagnostic device.**
 
@@ -49,13 +49,57 @@ Synthetic EEG dataset generated for pipeline validation: 60 subjects (30 ADHD / 
 
 **E7 (CTENet Original):** Not trained on CPU — O(C²·Tz²·D) TE backprop is prohibitively slow (timed out after 10 min even with 3 epochs/fold). Requires GPU. Forward/backward pass verified; loss decreases.
 
-**Tests:** 24/24 passed in `tests/test_pipeline.py`.
+**Tests:** 30/30 passed in `tests/test_pipeline.py`.
 
 **Results saved to:** `results/final_run_20261122/` (classical/, deep/, hybrid/ subdirectories).
 
 ---
 
-## 1. Headline results
+## Latest real-data run (2026-11-23) — E1–E6 completed on CUDA
+
+All experiments on the 121-child IEEE DataPort dataset (61 ADHD / 60 control, 2,918 epochs, subject-wise 5-fold CV). Deep models trained on CUDA (RTX 3050 6GB). Classical models on CPU. **30/30 pipeline tests pass.**
+
+### E1–E5: Classical models (Paper 1 features)
+
+| Model | Feature set | AUROC | Accuracy | Sensitivity | Specificity |
+|-------|-------------|-------|----------|-------------|-------------|
+| XGBoost | node | 0.609 | 0.537 | 0.525 | 0.550 |
+| XGBoost | node+adj | 0.769 | 0.669 | 0.705 | 0.633 |
+| XGBoost | node+adj+rel | 0.767 | 0.669 | 0.705 | 0.633 |
+| SVM-RBF | node | 0.664 | 0.628 | 0.689 | 0.567 |
+| SVM-RBF | node+adj | 0.764 | 0.678 | 0.672 | 0.683 |
+| SVM-RBF | node+adj+rel | 0.781 | 0.653 | 0.557 | 0.750 |
+| Random Forest | node | 0.673 | 0.595 | 0.639 | 0.550 |
+| Random Forest | node+adj | 0.784 | 0.669 | 0.738 | 0.600 |
+| Random Forest | node+adj+rel | 0.775 | 0.669 | 0.738 | 0.600 |
+| ExtraTrees | node | 0.679 | 0.620 | 0.754 | 0.483 |
+| ExtraTrees | node+adj | **0.788** | **0.694** | **0.803** | 0.583 |
+| ExtraTrees | node+adj+rel | 0.781 | 0.686 | 0.754 | 0.617 |
+| Logistic Regression | node | 0.567 | 0.603 | 0.623 | 0.583 |
+| Logistic Regression | node+adj | 0.728 | 0.686 | 0.770 | 0.600 |
+| Logistic Regression | node+adj+rel | 0.701 | 0.653 | 0.672 | 0.633 |
+
+**Best classical:** ExtraTrees node+adj (E4) — AUROC 0.788, accuracy 0.694.
+
+### E6: Deep model — EEGNet (CUDA)
+
+| Metric | Value |
+|--------|-------|
+| AUROC | 0.730 |
+| Accuracy | 0.653 |
+| Sensitivity | 0.705 |
+| Specificity | 0.600 |
+| Subjects | 121 |
+| Epochs | 2,918 |
+| Device | CUDA |
+
+**E7 (CTENet Original):** Architecture verified by tests; full 5-fold GPU training time-limited in this session. Forward/backward on CUDA verified.
+**E8 (CTENet Inspired):** Not trained in this session.
+**E9–E12 (Hybrid):** Code leakage-fixed and test-verified; full real-data hybrid training requires additional GPU time.
+
+All predictions are participant-level (one probability per subject, epoch-averaged). Each subject appears in exactly one test fold.
+
+---
 
 | Result | Accuracy (95% CI) | AUROC (95% CI) | Sensitivity | Specificity |
 |---|---:|---:|---:|---:|
