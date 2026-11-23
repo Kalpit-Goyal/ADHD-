@@ -142,14 +142,16 @@ def collect_branch_a_probs(
     seed: int,
     feature_set: str = "node+adj+rel",
     k: int = 150,
-) -> dict[int, dict[str, float]]:
-    """Collect XGBoost out-of-fold test probabilities per fold.
+) -> tuple[dict[int, dict[str, float]], dict[int, dict[str, float]]]:
+    """Collect XGBoost out-of-fold test and validation probabilities per fold.
 
-    Returns {fold_index: {subject_id: participant_level_prob}}.
+    Returns (test_probs, val_probs) where each is
+    {fold_index: {subject_id: participant_level_prob}}.
     Uses aggregate_subject_probs to average epoch probabilities per subject
     (never overwrites with dict zip).
     """
-    branch_a_probs: dict[int, dict[str, float]] = {}
+    branch_a_test_probs: dict[int, dict[str, float]] = {}
+    branch_a_val_probs: dict[int, dict[str, float]] = {}
     a_features = _build_epoch_features(bundle, feature_set)
 
     for fold, fold_spec in enumerate(folds):
@@ -169,13 +171,25 @@ def collect_branch_a_probs(
             a_features[train_index], bundle.labels[train_index].astype(int)
         )
 
-        # Tune threshold on validation subjects.
+        # Validation predictions (participant-level) for threshold tuning.
         val_prob = model.predict_proba(a_features[val_index])[:, 1]
-        val_subject = _subject_probs(val_prob, bundle.subject_ids[val_index])
-        val_y = np.asarray(
-            [bundle.subject_labels[str(s)] for s in val_subject.index], dtype=int
+        val_subject_prob = aggregate_subject_probs(
+            bundle.subject_ids[val_index], val_prob
         )
-        threshold = float(youden_threshold(val_y, val_subject.to_numpy()))
+        branch_a_val_probs[fold] = {
+            str(sid): float(prob) for sid, prob in val_subject_prob.items()
+        }
+
+        # Tune threshold on validation subjects.
+        val_y = np.asarray(
+            [bundle.subject_labels[str(s)] for s in branch_a_val_probs[fold]],
+            dtype=int,
+        )
+        val_p = np.asarray(
+            [branch_a_val_probs[fold][s] for s in branch_a_val_probs[fold]],
+            dtype=float,
+        )
+        threshold = float(youden_threshold(val_y, val_p))
 
         # Refit on train+val.
         model.fit(
@@ -187,11 +201,11 @@ def collect_branch_a_probs(
         test_subject_prob = aggregate_subject_probs(
             bundle.subject_ids[test_index], test_prob
         )
-        branch_a_probs[fold] = {
+        branch_a_test_probs[fold] = {
             str(sid): float(prob) for sid, prob in test_subject_prob.items()
         }
 
-    return branch_a_probs
+    return branch_a_test_probs, branch_a_val_probs
 
 
 def main() -> None:
@@ -206,6 +220,12 @@ def main() -> None:
     parser.add_argument(
         "--device", default="cuda", choices=["auto", "cpu", "cuda"],
         help="Device for deep models. 'cuda' is required; CPU fallback is prohibited.",
+    )
+    parser.add_argument(
+        "--deep-model", default="ctenet_original",
+        choices=["ctenet_original", "cte_net"],
+        help="Deep model architecture for hybrid experiments. "
+        "ctenet_original = paper reconstruction (E7); cte_net = inspired graph model (E8).",
     )
     parser.add_argument(
         "--official-folds", default=None, help="Path to official CTE-Net folds JSON"
@@ -250,7 +270,7 @@ def main() -> None:
 
     # ----- Branch A: XGBoost OOF probabilities per fold -----
     print("\n=== Branch A (XGBoost) OOF predictions ===")
-    branch_a_probs = collect_branch_a_probs(bundle, folds, args.seed)
+    branch_a_probs, branch_a_val_probs = collect_branch_a_probs(bundle, folds, args.seed)
 
     # ----- Branch B: Deep model OOF probabilities per fold -----
     branch_b_probs: Optional[dict[int, dict[str, float]]] = None
@@ -260,7 +280,7 @@ def main() -> None:
         print("\n=== SKIP-DEEP: Classical-only ablation (not E9-E12) ===")
     else:
         print("\n=== Training deep model per fold ===")
-        deep_model_factory = make_deep_model_factory(config, device, "cte_net")
+        deep_model_factory = make_deep_model_factory(config, device, args.deep_model)
 
         # Train deep model per fold using the SAME folds as the hybrid pipeline.
         branch_b_probs = {}
@@ -278,7 +298,7 @@ def main() -> None:
                 test_subjects,
                 config,
                 device,
-                "cte_net",
+                args.deep_model,
                 args.seed,
                 fold,
             )
@@ -304,7 +324,7 @@ def main() -> None:
         deep_model_factory=deep_model_factory,
         deep_config=None,
         device=device,
-        model_name="cte_net",
+        model_name=args.deep_model,
         real_data=True,
     )
     save_hybrid_result(fusion_result, output_dir / "models")
@@ -319,12 +339,13 @@ def main() -> None:
     soft_result = run_prediction_ensemble(
         bundle, folds, args.seed,
         branch_a_probs=branch_a_probs,
+        branch_a_val_probs=branch_a_val_probs,
         branch_b_probs=branch_b_probs,
         method="soft_voting",
         real_data=True,
         deep_model_factory=deep_model_factory,
         device=device,
-        model_name="cte_net",
+        model_name=args.deep_model,
     )
     save_hybrid_result(soft_result, output_dir / "models")
     print(
@@ -338,13 +359,14 @@ def main() -> None:
     weighted_result = run_prediction_ensemble(
         bundle, folds, args.seed,
         branch_a_probs=branch_a_probs,
+        branch_a_val_probs=branch_a_val_probs,
         branch_b_probs=branch_b_probs,
         method="weighted_voting",
         weights=None,
         real_data=True,
         deep_model_factory=deep_model_factory,
         device=device,
-        model_name="cte_net",
+        model_name=args.deep_model,
     )
     save_hybrid_result(weighted_result, output_dir / "models")
     print(
@@ -358,12 +380,13 @@ def main() -> None:
     stacking_result = run_prediction_ensemble(
         bundle, folds, args.seed,
         branch_a_probs=branch_a_probs,
+        branch_a_val_probs=branch_a_val_probs,
         branch_b_probs=branch_b_probs,
         method="stacking",
         real_data=True,
         deep_model_factory=deep_model_factory,
         device=device,
-        model_name="cte_net",
+        model_name=args.deep_model,
     )
     save_hybrid_result(stacking_result, output_dir / "models")
     print(

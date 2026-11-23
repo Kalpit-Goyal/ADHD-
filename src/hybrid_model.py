@@ -282,19 +282,39 @@ def _train_deep_model_on_subjects(
 
     from src.config import ModelConfig
 
-    train_indices = np.flatnonzero(np.isin(bundle.subject_ids, train_subjects))
-    val_indices = (
-        np.flatnonzero(np.isin(bundle.subject_ids, val_subjects))
-        if val_subjects
-        else np.array([], dtype=int)
+    val_set = set(map(str, val_subjects)) if val_subjects else set()
+    # Exclude validation/development subjects from actual training to prevent
+    # train/dev overlap leakage.
+    actual_train_subjects = [s for s in train_subjects if str(s) not in val_set]
+    assert set(map(str, actual_train_subjects)).isdisjoint(val_set), (
+        "Train/dev participant overlap detected"
     )
+    # Fallback: if dev split consumed all train subjects, train on all of them
+    # without early stopping rather than producing an empty dataset.
+    if len(actual_train_subjects) == 0:
+        actual_train_subjects = list(train_subjects)
+        val_indices = np.array([], dtype=int)
+    else:
+        val_indices = (
+            np.flatnonzero(np.isin(bundle.subject_ids, val_subjects))
+            if val_subjects
+            else np.array([], dtype=int)
+        )
+    train_indices = np.flatnonzero(np.isin(bundle.subject_ids, actual_train_subjects))
+    if len(train_indices) == 0:
+        raise ValueError(
+            f"No training epochs available for subjects {actual_train_subjects}; "
+            "cannot train deep model."
+        )
 
     if model_factory is not None:
         model = model_factory().to(device)
     else:
         cfg = ModelConfig(name=model_name)
+        # Derive n_times from actual bundle data, not hardcoded.
+        n_times = int(bundle.raw.shape[-1]) if bundle.raw.ndim >= 4 else int(bundle.fs * bundle.epoch_seconds)
         model = (
-            build_model(cfg, n_channels=19, n_features=6, n_times=640)
+            build_model(cfg, n_channels=19, n_features=6, n_times=n_times)
             .to(device)
         )
 
@@ -858,7 +878,9 @@ def run_prediction_ensemble(
     folds: list[Fold],
     seed: int,
     branch_a_probs: dict[int, dict[str, float]],
+    branch_a_val_probs: Optional[dict[int, dict[str, float]]] = None,
     branch_b_probs: Optional[dict[int, dict[str, float]]] = None,
+    branch_b_val_probs: Optional[dict[int, dict[str, float]]] = None,
     method: str = "soft_voting",
     weights: Optional[list[float]] = None,
     deep_model_factory: Optional[Callable[[], torch.nn.Module]] = None,
@@ -900,6 +922,11 @@ def run_prediction_ensemble(
     n_subjects = len(subject_list)
     all_subject_labels = dict(bundle.subject_labels)
 
+    # Track whether val probs were explicitly provided by the caller,
+    # so we can distinguish "missing from caller" from "derived but empty".
+    branch_a_val_explicit = branch_a_val_probs is not None
+    branch_b_val_explicit = branch_b_val_probs is not None
+
     # Build Branch A features for stacking inner CV.
     feature_set = "node+adj+rel"
     from src.classical_models import (
@@ -915,11 +942,21 @@ def run_prediction_ensemble(
         outer_train_subj: list[str],
         n_inner: int = 3,
     ) -> Optional[list[float]]:
-        """Derive branch weights from inner OOF predictions on outer-train subjects only.
+        """Derive branch weights from fresh inner OOF predictions.
 
-        Returns [w_a, w_b] normalized to sum to 1, or None if only branch A.
+        For each inner fold:
+          - Train XGBoost on inner-train subjects only.
+          - Train a fresh deep model on inner-train subjects only,
+            with a disjoint dev split carved from inner-train for early stopping.
+          - Predict on inner-held-out participants only.
+        - Align predictions by participant ID.
+        - Calculate weights from these genuine inner OOF predictions.
+
+        Never reuses globally precomputed branch_b_probs, which were
+        computed with a different fold structure and may leak test-fold
+        information into weight derivation.
         """
-        if branch_b_probs is None:
+        if deep_model_factory is None or device is None:
             return None
 
         inner_folds = _make_inner_folds(
@@ -934,38 +971,57 @@ def run_prediction_ensemble(
         for inner_tr, inner_val in inner_folds:
             if len(inner_val) == 0:
                 continue
+
+            inner_tr_index = np.flatnonzero(
+                np.isin(bundle.subject_ids, inner_tr)
+            )
+            inner_val_index = np.flatnonzero(
+                np.isin(bundle.subject_ids, inner_val)
+            )
+
+            # Branch A: XGBoost on inner-train, predict inner-held-out.
+            xgb_inner = _cla_make_model(
+                "xgboost", seed, n_features=a_features.shape[1], k=150
+            )
+            xgb_inner.fit(
+                a_features[inner_tr_index],
+                bundle.labels[inner_tr_index].astype(int),
+            )
+            inner_val_prob = xgb_inner.predict_proba(
+                a_features[inner_val_index]
+            )[:, 1]
+            inner_val_subject_probs = _cla_subject_probs(
+                inner_val_prob, bundle.subject_ids[inner_val_index]
+            )
+            for sid, prob in inner_val_subject_probs.items():
+                a_oof_p.append(float(prob))
+                a_oof_y.append(all_subject_labels[str(sid)])
+
+            # Branch B: fresh deep model on inner-train, predict inner-held-out.
+            # Early stopping uses a disjoint dev split carved from inner-train.
+            inner_deep_probs = _train_deep_oof(
+                bundle,
+                list(inner_tr),
+                list(inner_val),
+                seed,
+                device,
+                model_name,
+                model_factory=deep_model_factory,
+                epochs=10,
+                batch_size=32,
+                lr=1e-3,
+                weight_decay=1e-4,
+                patience=5,
+            )
             for sid in inner_val:
                 sid_str = str(sid)
-                # Branch A: train XGBoost on inner-tr, predict on this sid.
-                inner_tr_index = np.flatnonzero(
-                    np.isin(bundle.subject_ids, inner_tr)
-                )
-                xgb_inner = _cla_make_model(
-                    "xgboost", seed, n_features=a_features.shape[1], k=150
-                )
-                xgb_inner.fit(
-                    a_features[inner_tr_index],
-                    bundle.labels[inner_tr_index].astype(int),
-                )
-                sid_index = np.flatnonzero(
-                    np.isin(bundle.subject_ids, [sid])
-                )
-                sid_prob = xgb_inner.predict_proba(
-                    a_features[sid_index]
-                )[:, 1]
-                a_oof_p.append(float(sid_prob[0]))
-                a_oof_y.append(all_subject_labels[sid_str])
-
-                # Branch B: use pre-computed OOF probs from the fold where sid was test.
-                found = False
-                for f, fold_spec in enumerate(folds):
-                    if sid_str in map(str, fold_spec.test):
-                        fb = (branch_b_probs or {}).get(f, {})
-                        if sid_str in fb:
-                            b_oof_p.append(float(fb[sid_str]))
-                            b_oof_y.append(all_subject_labels[sid_str])
-                            found = True
-                        break
+                if sid_str not in inner_deep_probs:
+                    raise RuntimeError(
+                        f"E11 weight derivation: missing deep OOF prob for "
+                        f"subject {sid_str} in inner fold"
+                    )
+                b_oof_p.append(float(inner_deep_probs[sid_str]))
+                b_oof_y.append(all_subject_labels[sid_str])
 
         if not a_oof_p or not b_oof_p:
             return None
@@ -992,16 +1048,23 @@ def run_prediction_ensemble(
             test_subjects = list(fold_spec.test)
             fold_probs = branch_a_probs.get(fold, {})
             for s in test_subjects:
-                idx = index_of[str(s)]
-                a_oof[idx] = float(fold_probs.get(str(s), 0.5))
-                a_fold_of[idx] = fold
-                if (
-                    b_oof is not None
-                    and fold in (branch_b_probs or {})
-                ):
-                    b_oof[idx] = float(
-                        (branch_b_probs or {})[fold].get(str(s), 0.5)
+                sid_str = str(s)
+                idx = index_of[sid_str]
+                if sid_str not in fold_probs:
+                    raise RuntimeError(
+                        f"E10/E11: missing Branch A test probability for "
+                        f"subject {sid_str} in fold {fold}"
                     )
+                a_oof[idx] = float(fold_probs[sid_str])
+                a_fold_of[idx] = fold
+                if b_oof is not None and fold in (branch_b_probs or {}):
+                    fb = (branch_b_probs or {})[fold]
+                    if sid_str not in fb:
+                        raise RuntimeError(
+                            f"E10/E11: missing Branch B test probability for "
+                            f"subject {sid_str} in fold {fold}"
+                        )
+                    b_oof[idx] = float(fb[sid_str])
 
         # ----- Derive per-fold weights (training data only) -----
         fold_weights: dict[int, list[float]] = {}
@@ -1017,6 +1080,8 @@ def run_prediction_ensemble(
                     w = _derive_weights_from_inner_oof(outer_train)
                     fold_weights[fold] = w if w is not None else [1.0]
 
+        # ----- Compute combined OOF probabilities for test subjects -----
+        combined = np.zeros(n_subjects, dtype=float)
         if method == "soft_voting":
             if b_oof is not None:
                 combined = 0.5 * a_oof + 0.5 * b_oof
@@ -1027,57 +1092,220 @@ def run_prediction_ensemble(
             for fold, fold_spec in enumerate(folds):
                 test_subjects = list(fold_spec.test)
                 w = fold_weights.get(fold, [1.0])
+                w_sum = sum(w)
                 for s in test_subjects:
                     idx = index_of[str(s)]
                     a_p = float(a_oof[idx])
                     if b_oof is not None:
                         b_p = float(b_oof[idx])
-                        combined[idx] = (w[0] * a_p + w[1] * b_p) / sum(w)
+                        # Handle single-weight case (no deep model).
+                        if len(w) >= 2:
+                            combined[idx] = (w[0] * a_p + w[1] * b_p) / w_sum
+                        else:
+                            combined[idx] = a_p
                     else:
                         combined[idx] = a_p
 
-        # ----- Threshold tuning on outer-val participants only -----
-        # For soft_voting/weighted_voting, tune threshold per fold using
-        # the combined probabilities on outer-val subjects.
+        # ----- Compute Branch B validation probs if not provided -----
+        if branch_b_val_probs is None and deep_model_factory is not None and device is not None:
+            branch_b_val_probs = {}
+            for fold, fold_spec in enumerate(folds):
+                train_subjects = list(fold_spec.train)
+                val_subjects = list(fold_spec.val)
+                val_deep_probs = _train_deep_oof(
+                    bundle,
+                    train_subjects,
+                    val_subjects,
+                    seed,
+                    device,
+                    model_name,
+                    model_factory=deep_model_factory,
+                    epochs=10,
+                    batch_size=32,
+                    lr=1e-3,
+                    weight_decay=1e-4,
+                    patience=5,
+                )
+                branch_b_val_probs[fold] = val_deep_probs
+
+        # ----- Build val probs from test probs if val probs not provided -----
+        # Each subject is a test subject in exactly one fold, so val subjects
+        # for fold f can be looked up in branch_a_probs[branch_b_probs] of the
+        # fold where they were test subjects.
+        if branch_a_val_probs is None:
+            branch_a_val_probs = {}
+            test_fold_of_subject = {}
+            for f, fspec in enumerate(folds):
+                for s in fspec.test:
+                    test_fold_of_subject[str(s)] = f
+            for fold, fold_spec in enumerate(folds):
+                val_probs: dict[str, float] = {}
+                for s in fold_spec.val:
+                    sid_str = str(s)
+                    test_fold = test_fold_of_subject.get(sid_str)
+                    if test_fold is not None and test_fold in (branch_a_probs or {}):
+                        val_probs[sid_str] = float(
+                            branch_a_probs[test_fold][sid_str]
+                        )
+                branch_a_val_probs[fold] = val_probs
+
+        if branch_b_val_probs is None and branch_b_probs is not None:
+            branch_b_val_probs = {}
+            test_fold_of_subject = {}
+            for f, fspec in enumerate(folds):
+                for s in fspec.test:
+                    test_fold_of_subject[str(s)] = f
+            for fold, fold_spec in enumerate(folds):
+                val_probs: dict[str, float] = {}
+                for s in fold_spec.val:
+                    sid_str = str(s)
+                    test_fold = test_fold_of_subject.get(sid_str)
+                    if test_fold is not None and test_fold in (branch_b_probs or {}):
+                        fb = branch_b_probs[test_fold]
+                        if sid_str in fb:
+                            val_probs[sid_str] = float(fb[sid_str])
+                branch_b_val_probs[fold] = val_probs
+
+        # ----- Compute Branch A val probs on the fly for subjects never in test -----
+        # Some val subjects may never appear as test subjects (e.g., with few folds),
+        # so they can't be looked up from branch_a_probs. Train XGBoost on train
+        # subjects and predict on val subjects for those missing entries.
+        if branch_a_val_probs is not None:
+            for fold, fold_spec in enumerate(folds):
+                val_subjects = list(fold_spec.val)
+                train_subjects = list(fold_spec.train)
+                missing = [s for s in val_subjects if str(s) not in branch_a_val_probs.get(fold, {})]
+                if missing:
+                    train_index = np.flatnonzero(
+                        np.isin(bundle.subject_ids, train_subjects)
+                    )
+                    val_index = np.flatnonzero(
+                        np.isin(bundle.subject_ids, missing)
+                    )
+                    if len(train_index) == 0:
+                        raise RuntimeError(
+                            f"E10/E11: no training data available to derive "
+                            f"Branch A validation probabilities for fold {fold}"
+                        )
+                    # Skip if all training labels are identical (XGBoost
+                    # cannot fit a single-class logistic objective).
+                    train_labels = bundle.labels[train_index].astype(int)
+                    if len(np.unique(train_labels)) < 2:
+                        constant = float(train_labels.mean())
+                        if fold not in branch_a_val_probs:
+                            branch_a_val_probs[fold] = {}
+                        for sid in missing:
+                            branch_a_val_probs[fold][str(sid)] = constant
+                    else:
+                        xgb_val = _cla_make_model(
+                            "xgboost", seed, n_features=a_features.shape[1], k=150
+                        )
+                        xgb_val.fit(
+                            a_features[train_index], train_labels
+                        )
+                        val_prob = xgb_val.predict_proba(
+                            a_features[val_index]
+                        )[:, 1]
+                        val_map = _cla_subject_probs(
+                            val_prob, bundle.subject_ids[val_index]
+                        )
+                        if fold not in branch_a_val_probs:
+                            branch_a_val_probs[fold] = {}
+                        for sid, p in val_map.items():
+                            branch_a_val_probs[fold][str(sid)] = float(p)
+
+        # ----- Compute Branch B val probs on the fly if deep factory available -----
+        if branch_b_val_probs is not None and deep_model_factory is not None and device is not None:
+            for fold, fold_spec in enumerate(folds):
+                val_subjects = list(fold_spec.val)
+                train_subjects = list(fold_spec.train)
+                missing = [s for s in val_subjects if str(s) not in branch_b_val_probs.get(fold, {})]
+                if missing:
+                    val_deep_probs = _train_deep_oof(
+                        bundle,
+                        train_subjects,
+                        missing,
+                        seed,
+                        device,
+                        model_name,
+                        model_factory=deep_model_factory,
+                        epochs=10,
+                        batch_size=32,
+                        lr=1e-3,
+                        weight_decay=1e-4,
+                        patience=5,
+                    )
+                    if fold not in branch_b_val_probs:
+                        branch_b_val_probs[fold] = {}
+                    for sid in missing:
+                        sid_str = str(sid)
+                        if sid_str in val_deep_probs:
+                            branch_b_val_probs[fold][sid_str] = float(
+                                val_deep_probs[sid_str]
+                            )
+        # Validation thresholds are calculated from actual validation
+        # predictions. Missing predictions cause an explicit error.
         fold_thresholds: dict[int, float] = {}
         final_y_pred = np.zeros(n_subjects, dtype=int)
+
+        has_deep = branch_b_probs is not None
 
         for fold, fold_spec in enumerate(folds):
             val_subjects = list(fold_spec.val)
             test_subjects = list(fold_spec.test)
 
-            # Val probabilities.
+            val_a_map = branch_a_val_probs.get(fold, {}) if branch_a_val_probs else {}
+            val_b_map = branch_b_val_probs.get(fold, {}) if branch_b_val_probs else {}
+
             val_a = []
             val_b = []
             val_y = []
             for s in val_subjects:
                 sid_str = str(s)
-                fa = branch_a_probs.get(fold, {})
-                if sid_str not in fa:
-                    continue
-                val_a.append(float(fa[sid_str]))
+                if sid_str not in val_a_map:
+                    raise RuntimeError(
+                        f"E10/E11: missing Branch A validation probability for "
+                        f"subject {sid_str} in fold {fold}"
+                    )
+                val_a.append(float(val_a_map[sid_str]))
                 val_y.append(all_subject_labels[sid_str])
-                if b_oof is not None and fold in (branch_b_probs or {}):
-                    fb = (branch_b_probs or {}).get(fold, {})
-                    val_b.append(float(fb.get(sid_str, 0.5)))
+                if has_deep:
+                    if sid_str not in val_b_map:
+                        # branch_b_val_probs was explicitly provided but
+                        # incomplete: raise rather than silently use 0.5.
+                        if branch_b_val_explicit:
+                            raise RuntimeError(
+                                f"E10/E11: missing Branch B validation probability for "
+                                f"subject {sid_str} in fold {fold}"
+                            )
+                        # Not explicitly provided and no deep factory: use 0.5.
+                        val_b.append(0.5)
+                    else:
+                        val_b.append(float(val_b_map[sid_str]))
                 else:
                     val_b.append(0.5)
 
-            if len(val_a) > 0:
-                val_a_arr = np.asarray(val_a)
-                val_b_arr = np.asarray(val_b)
-                if method == "soft_voting":
-                    val_combined = 0.5 * val_a_arr + 0.5 * val_b_arr
-                else:
-                    w = fold_weights.get(fold, [1.0])
-                    val_combined = (w[0] * val_a_arr + w[1] * val_b_arr) / sum(w)
-
-                val_y_arr = np.asarray(val_y, dtype=int)
-                fold_thresholds[fold] = float(
-                    _cla_youden(val_y_arr, val_combined)
+            if len(val_a) == 0:
+                raise RuntimeError(
+                    f"E10/E11: no validation predictions available for fold {fold}"
                 )
+
+            val_a_arr = np.asarray(val_a)
+            val_b_arr = np.asarray(val_b)
+            if method == "soft_voting":
+                val_combined = 0.5 * val_a_arr + 0.5 * val_b_arr
             else:
-                fold_thresholds[fold] = 0.5
+                w = fold_weights.get(fold, [1.0])
+                w_sum = sum(w)
+                if len(w) >= 2:
+                    val_combined = (w[0] * val_a_arr + w[1] * val_b_arr) / w_sum
+                else:
+                    val_combined = val_a_arr
+
+            val_y_arr = np.asarray(val_y, dtype=int)
+            fold_thresholds[fold] = float(
+                _cla_youden(val_y_arr, val_combined)
+            )
 
             # Apply threshold to test subjects.
             for s in test_subjects:
@@ -1110,13 +1338,16 @@ def run_prediction_ensemble(
             )
 
             # OOF participant-level probabilities for outer training participants.
+            # Also track which inner fold produced each subject's OOF prediction
+            # for cross-fitted meta threshold selection.
             xgb_oof_train = np.zeros(len(outer_train), dtype=float)
             deep_oof_train = None
             if deep_model_factory is not None and device is not None:
                 deep_oof_train = np.zeros(len(outer_train), dtype=float)
+            inner_fold_of_subject = np.full(len(outer_train), -1, dtype=int)
 
-            for inner_tr_idx, inner_val_idx in inner_cv.split(
-                outer_train_arr, outer_train_labels
+            for inner_fold_idx, (inner_tr_idx, inner_val_idx) in enumerate(
+                inner_cv.split(outer_train_arr, outer_train_labels)
             ):
                 inner_tr_subjects = outer_train_arr[inner_tr_idx].tolist()
                 inner_val_subjects = outer_train_arr[inner_val_idx].tolist()
@@ -1145,6 +1376,7 @@ def run_prediction_ensemble(
                 for sid, prob in inner_val_subject_probs.items():
                     pos = int(np.where(outer_train_arr == str(sid))[0][0])
                     xgb_oof_train[pos] = float(prob)
+                    inner_fold_of_subject[pos] = inner_fold_idx
 
                 # Deep model OOF: participant-level probabilities for inner-val.
                 # Early stopping uses a dev split carved from inner-train,
@@ -1177,16 +1409,42 @@ def run_prediction_ensemble(
                 meta_X = xgb_oof_train.reshape(-1, 1)
             meta_y = outer_train_labels
 
+            # Verify every outer-train subject has an OOF prediction.
+            missing_oof = inner_fold_of_subject < 0
+            if np.any(missing_oof):
+                missing_sids = outer_train_arr[missing_oof].tolist()
+                raise RuntimeError(
+                    f"E12 stacking: missing OOF predictions for outer-train "
+                    f"subjects: {missing_sids}"
+                )
+
             meta = LogisticRegression(
                 max_iter=3000, class_weight="balanced", random_state=seed
             )
             meta.fit(meta_X, meta_y)
 
-            # Tune threshold on inner-val-equivalent: use OOF predictions themselves
-            # as a proxy (they are out-of-sample for each subject).
-            oof_meta_prob = meta.predict_proba(meta_X)[:, 1]
+            # Cross-fitted meta predictions for threshold selection.
+            # For each inner fold, retrain meta on OOF from the other folds
+            # and predict on this fold's subjects. This gives truly
+            # out-of-sample meta predictions (no in-sample threshold tuning).
+            cross_fitted_meta_prob = np.zeros(len(outer_train), dtype=float)
+            for cf_fold_idx in range(inner_n_splits):
+                val_mask = inner_fold_of_subject == cf_fold_idx
+                if not np.any(val_mask):
+                    continue
+                train_mask = inner_fold_of_subject != cf_fold_idx
+                if not np.any(train_mask):
+                    continue
+                meta_cf = LogisticRegression(
+                    max_iter=3000, class_weight="balanced", random_state=seed
+                )
+                meta_cf.fit(meta_X[train_mask], meta_y[train_mask])
+                cross_fitted_meta_prob[val_mask] = meta_cf.predict_proba(
+                    meta_X[val_mask]
+                )[:, 1]
+
             fold_thresholds[outer_fold] = float(
-                _cla_youden(meta_y, oof_meta_prob)
+                _cla_youden(meta_y, cross_fitted_meta_prob)
             )
 
             # Retrain base models on full outer training participants.

@@ -40,22 +40,22 @@ Synthetic EEG dataset generated for pipeline validation: 60 subjects (30 ADHD / 
 | E5 | Logistic Regression | node+adj | 1.000 | 0.983 | 0.967 | 1.000 |
 | E5 | Logistic Regression | node+adj+rel | 1.000 | 0.967 | 0.933 | 1.000 |
 | E6 | EEGNet (raw CNN) | raw (1,19,640) | 1.000 | 0.900 | 0.800 | 1.000 |
-| E7 | CTE-Net Original | raw EEG | — | — | — | — |
-| E8 | CTENet Inspired | node+adj | 1.000 | 0.917 | 0.833 | 1.000 |
-| E9 | Feature Fusion | node+adj+rel + deep | 1.000 | 1.000 | 1.000 | 1.000 |
-| E10 | Soft Voting | — | 1.000 | 1.000 | 1.000 | 1.000 |
-| E11 | Weighted Voting | — | 1.000 | 1.000 | 1.000 | 1.000 |
-| E12 | Stacking | — | 1.000 | 1.000 | 1.000 | 1.000 |
+| E7 | CTE-Net Original | raw EEG | 0.657 | 0.628 | 0.672 | 0.583 |
+| E8 | CTENet Inspired | node+adj | 0.509 | 0.512 | 0.574 | 0.450 |
+| E9 | Feature Fusion | node+adj+rel + deep (cte_net) | 0.782 | 0.727 | 0.934 | 0.517 |
+| E10 | Soft Voting | — (cte_net) | 0.838 | 0.752 | 0.967 | 0.533 |
+| E11 | Weighted Voting | — (cte_net) | 0.820 | 0.727 | 0.918 | 0.533 |
+| E12 | Stacking | — (cte_net) | 0.825 | 0.727 | 0.852 | 0.600 |
 
 **E7 (CTENet Original):** Not trained on CPU — O(C²·Tz²·D) TE backprop is prohibitively slow (timed out after 10 min even with 3 epochs/fold). Requires GPU. Forward/backward pass verified; loss decreases.
 
-**Tests:** 30/30 passed in `tests/test_pipeline.py`.
+**Tests:** 40/40 passed in `tests/test_pipeline.py`.
 
 **Results saved to:** `results/final_run_20261122/` (classical/, deep/, hybrid/ subdirectories).
 
 ---
 
-## Latest real-data run (2026-11-23) — E1–E6 completed on CUDA
+## Latest real-data run (2026-11-23) — E1–E6 completed on CUDA, E7–E12 smoke tests on CUDA
 
 All experiments on the 121-child IEEE DataPort dataset (61 ADHD / 60 control, 2,918 epochs, subject-wise 5-fold CV). Deep models trained on CUDA (RTX 3050 6GB). Classical models on CPU. **30/30 pipeline tests pass.**
 
@@ -93,9 +93,14 @@ All experiments on the 121-child IEEE DataPort dataset (61 ADHD / 60 control, 2,
 | Epochs | 2,918 |
 | Device | CUDA |
 
-**E7 (CTENet Original):** CUDA smoke test completed (1 epoch, 2 folds): AUROC 0.707, accuracy 0.620. Full 60-epoch 5-fold training time-limited on RTX 3050 6GB — TE computation O(C²·Tz²·D) per epoch too slow for full run within session. Forward/backward on CUDA verified by test_n_cuda_forward_backward. Architecture matches paper (d_model=128, n_heads=1, n_layers=1, dropout=0.5, kernel_size=83, valid padding).
-**E8 (CTENet Inspired):** Not trained in this session. Architecture verified by tests.
-**E9–E12 (Hybrid):** Code leakage-fixed (E11 weight derivation, E12 missing args, E9 deep_model_factory threading) and test-verified on synthetic data (test_j_end_to_end_synthetic_smoke). Full real-data hybrid training requires retraining deep models per inner CV split — time-intensive on RTX 3050 6GB.
+**E7 (CTENet Original):** CUDA smoke test completed (1 epoch, 2 folds): AUROC 0.657, accuracy 0.628, sens 0.672, spec 0.583. Full 60-epoch 5-fold training time-limited on RTX 3050 6GB — TE computation O(C²·Tz²·D) per epoch too slow for full run within session. Forward/backward on CUDA verified by test_n_cuda_forward_backward. Architecture matches paper (d_model=128, n_heads=1, n_layers=1, dropout=0.5, kernel_size=83, valid padding). See configs/eeg_cte_real_4s.yaml for 4-second/512-sample paper protocol.
+**E8 (CTENet Inspired):** CUDA smoke test completed (1 epoch, 2 folds): AUROC 0.509, accuracy 0.512, sens 0.574, spec 0.450. Labelled separately as inspired architecture — not claimed as original CTE-Net reproduction.
+**E9–E12 (Hybrid):** CUDA smoke tests completed (1 epoch, 2 folds, deep model = cte_net/inspired):
+  - E9 feature_fusion: AUROC 0.782, accuracy 0.727, sens 0.934, spec 0.517
+  - E10 soft_voting: AUROC 0.838, accuracy 0.752, sens 0.967, spec 0.533
+  - E11 weighted_voting: AUROC 0.820, accuracy 0.727, sens 0.918, spec 0.533
+  - E12 stacking: AUROC 0.825, accuracy 0.727, sens 0.852, spec 0.600
+Full 60-epoch 5-fold hybrid training with ctenet_original requires retraining deep models per inner CV split — time-intensive on RTX 3050 6GB. Use --deep-model ctenet_original for original CTE-Net in hybrid experiments.
 
 All predictions are participant-level (one probability per subject, epoch-averaged). Each subject appears in exactly one test fold.
 

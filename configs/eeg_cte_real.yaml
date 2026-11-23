@@ -11,7 +11,7 @@ data:
   # microvolt threshold is disabled. Rejection is done in z-score units.
   max_abs_uv: null
   max_abs_z: 10.0
-  connectivity: granger
+  connectivity: var_coefficient
   var_order: 5
 
 features:
